@@ -106,8 +106,8 @@
       "depends_on": [
         "T010"
       ],
-      "state": "pending",
-      "evidence": null,
+      "state": "done",
+      "evidence": "evidence/T011.md",
       "blocker": null
     },
     {

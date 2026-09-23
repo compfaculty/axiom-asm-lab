@@ -81,3 +81,10 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - Evidence: `evidence/T010.md`. Status: T010 `done`. Milestone → M006.
 - Next task: T011 — semantic IR and interpreter.
 - Next command: define typed IR ops/effects and interpreter with invalid-program diagnostics.
+
+## 2026-09-24 — T011 semantic IR and interpreter
+- Change: `language/` typed IR (effects/ownership/wrapping), interpreter wired to kernel oracles, SEMANTICS.md examples, rejection diagnostics.
+- Commands/results: unittest 72 OK including IR ill-typed/unsupported-effect cases.
+- Evidence: `evidence/T011.md`. Status: T011 `done`.
+- Next task: T012 — minimal source and native lowering.
+- Next command: parser/typecheck + lower sum/map/search to tested templates.
