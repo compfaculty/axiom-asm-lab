@@ -1,5 +1,7 @@
 # Open this folder in Cursor
 
+**Current status:** verification-integrity fixes are awaiting native validation. Read docs/VERIFICATION_REVIEW.md before advancing the task ledger. Historical milestone completion claims are under review.
+
 Extract the ZIP, then use **Open Folder** on `axiom-asm-lab` (the directory containing this file). The folder includes `.cursor/rules/axiom.mdc`, root `AGENTS.md`, source code, specs, a task ledger, and completion criteria.
 
 Paste this into Cursor Agent:

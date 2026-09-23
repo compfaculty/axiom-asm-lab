@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "current_milestone": "M006",
+  "current_milestone": "M002",
   "tasks": [
     {
       "id": "T001",
@@ -36,9 +36,9 @@
       "depends_on": [
         "T003"
       ],
-      "state": "done",
+      "state": "blocked",
       "evidence": "evidence/T004.md",
-      "blocker": null
+      "blocker": "Verification-integrity review reopened prerequisites; rerun native gates on macOS arm64 and reassess acceptance. See docs/VERIFICATION_REVIEW.md."
     },
     {
       "id": "T005",
@@ -46,9 +46,9 @@
       "depends_on": [
         "T004"
       ],
-      "state": "done",
+      "state": "blocked",
       "evidence": "evidence/T005.md",
-      "blocker": null
+      "blocker": "Verification-integrity review reopened prerequisites; rerun native gates on macOS arm64 and reassess acceptance. See docs/VERIFICATION_REVIEW.md."
     },
     {
       "id": "T006",
@@ -56,9 +56,9 @@
       "depends_on": [
         "T005"
       ],
-      "state": "done",
+      "state": "blocked",
       "evidence": "evidence/T006.md",
-      "blocker": null
+      "blocker": "Verification-integrity review reopened prerequisites; rerun native gates on macOS arm64 and reassess acceptance. See docs/VERIFICATION_REVIEW.md."
     },
     {
       "id": "T007",
@@ -66,9 +66,9 @@
       "depends_on": [
         "T006"
       ],
-      "state": "done",
+      "state": "blocked",
       "evidence": "evidence/T007.md",
-      "blocker": null
+      "blocker": "Verification-integrity review reopened prerequisites; rerun native gates on macOS arm64 and reassess acceptance. See docs/VERIFICATION_REVIEW.md."
     },
     {
       "id": "T008",
@@ -76,9 +76,9 @@
       "depends_on": [
         "T007"
       ],
-      "state": "done",
+      "state": "blocked",
       "evidence": "evidence/T008.md",
-      "blocker": null
+      "blocker": "Verification-integrity review reopened prerequisites; rerun native gates on macOS arm64 and reassess acceptance. See docs/VERIFICATION_REVIEW.md."
     },
     {
       "id": "T009",
@@ -86,9 +86,9 @@
       "depends_on": [
         "T008"
       ],
-      "state": "done",
+      "state": "blocked",
       "evidence": "evidence/T009.md",
-      "blocker": null
+      "blocker": "Verification-integrity review reopened prerequisites; rerun native gates on macOS arm64 and reassess acceptance. See docs/VERIFICATION_REVIEW.md."
     },
     {
       "id": "T010",
@@ -96,9 +96,9 @@
       "depends_on": [
         "T009"
       ],
-      "state": "done",
+      "state": "blocked",
       "evidence": "evidence/T010.md",
-      "blocker": null
+      "blocker": "Verification-integrity review reopened prerequisites; rerun native gates on macOS arm64 and reassess acceptance. See docs/VERIFICATION_REVIEW.md."
     },
     {
       "id": "T011",
@@ -106,9 +106,9 @@
       "depends_on": [
         "T010"
       ],
-      "state": "done",
+      "state": "blocked",
       "evidence": "evidence/T011.md",
-      "blocker": null
+      "blocker": "Verification-integrity review reopened prerequisites; rerun native gates on macOS arm64 and reassess acceptance. See docs/VERIFICATION_REVIEW.md."
     },
     {
       "id": "T012",
@@ -116,9 +116,9 @@
       "depends_on": [
         "T011"
       ],
-      "state": "done",
+      "state": "blocked",
       "evidence": "evidence/T012.md",
-      "blocker": null
+      "blocker": "Verification-integrity review reopened prerequisites; rerun native gates on macOS arm64 and reassess acceptance. See docs/VERIFICATION_REVIEW.md."
     }
   ]
 }

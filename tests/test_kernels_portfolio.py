@@ -1,4 +1,6 @@
 import sys
+import platform
+import shutil
 import unittest
 from pathlib import Path
 
@@ -47,6 +49,7 @@ class PortfolioTests(unittest.TestCase):
         self.assertIn('observations', rep['dependencies'])
         self.assertIn('inferences', rep['dependencies'])
 
+    @unittest.skipUnless(sys.platform == 'darwin' and platform.machine() == 'arm64' and shutil.which('clang'), 'requires macOS arm64 and clang')
     def test_native_comparisons(self):
         rep = run_native_comparisons(ROOT, seed=1)
         self.assertTrue(rep['all_ok'])

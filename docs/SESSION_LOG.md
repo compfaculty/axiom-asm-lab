@@ -95,3 +95,13 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - Evidence: `evidence/T012.md`. Status: T012 `done`. Milestone M006 complete.
 - Next: deferred work in IMPLEMENTATION_PLAN (no further tasks in packet).
 - Next command: review `docs/LANGUAGE_ROADMAP.md` Stage 4+ or open ADR for next milestone.
+
+## Verification-integrity review follow-up
+- Corrected imported versus verified search states; CLI search now invokes native evaluate-proposal in a child process with a remaining-budget timeout and process-group cleanup.
+- Executable hashes are checked before measurement; the normal native verifier now requires both tight guard-page orientations.
+- Promotion requires raw samples, distinct run IDs, matching identities, complete objectives and 30 pairs per size. Median-only fallback removed; exact regression ceiling fixed.
+- Proposal evaluation is explicitly limited to sum_u64 until per-kernel dispatch exists.
+- Portable tests now skip native integration checks on unsupported hosts. Native validation remains blocked in this Linux workspace.
+- T004 onward reopened as blocked pending prerequisite revalidation; historical evidence retained as history.
+- Next command on macOS arm64: python3 -m unittest discover -s tests -v
+- Remaining acceptance work: docs/VERIFICATION_REVIEW.md.

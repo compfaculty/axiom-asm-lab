@@ -297,7 +297,14 @@ def ensure_fresh(record):
         mark_stale(record, 'abi_wrap hash mismatch')
         raise RuntimeError('ABI wrapper changed after build; previous verification invalid for '
                            + record['name'])
+    binary = Path(record.get('binary_path', ''))
+    if (not binary.is_file() or sha256_file(binary) != record.get('binary_sha256')):
+        mark_stale(record, 'binary missing or hash mismatch')
+        raise RuntimeError('Binary changed or missing after build; measurement refused')
     ver = record.get('verification') or {}
+    if ver.get('state') == 'pass' and ver.get('binary_sha256_at_verify') != sha256_file(binary):
+        mark_stale(record, 'post-verify binary hash mismatch')
+        raise RuntimeError('Binary changed after verify; measurement refused')
     if ver.get('state') == 'pass':
         if (ver.get('source_sha256_at_verify') != src_hash
                 or ver.get('harness_sha256_at_verify') != harness_hash
@@ -531,7 +538,8 @@ def main():
                              help='Bench JSON path (must not already exist)')
     args = parser.parse_args()
     try:
-        doctor()
+        if args.command not in ('compare', 'propose-mock'):
+            doctor()
         if args.command == 'doctor':
             print(platform.platform(), clang_identity())
             return
@@ -555,7 +563,9 @@ def main():
                 max_seconds=args.max_seconds,
                 max_stagnation=args.max_stagnation,
             )
-            ctrl = SearchController(ROOT, args.dir.resolve(), budgets, provider=provider)
+            from search import native_evaluate_attempt
+            ctrl = SearchController(ROOT, args.dir.resolve(), budgets, provider=provider,
+                                    evaluate_fn=native_evaluate_attempt)
             state = ctrl.run(resume=args.resume)
             print(json.dumps({
                 'status': state.get('status'),
@@ -661,7 +671,7 @@ def main():
                 verify_binary(binary, record, run_dir=run_dir)
                 oracle_result = oracle_check(binary, run_dir)
                 finalize_verified(record, oracle_result)
-            except (RuntimeError, subprocess.CalledProcessError):
+            except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 if record.get('lifecycle') != LIFECYCLE_FAILED:
                     mark_failed(record, 'proposal_verify_failed', run_dir=run_dir)
                 raise
@@ -756,6 +766,7 @@ def main():
                 classify_session,
                 extract_medians,
                 extract_paired_ns,
+                validate_report,
             )
             if not 1 <= len(args.session) <= 2:
                 parser.error('compare requires one or two --session paths')
@@ -764,6 +775,7 @@ def main():
             reports = []
             for i, path in enumerate(args.session):
                 report = json.loads(path.read_text())
+                validate_report(report, args.baseline, args.candidate, SIZES)
                 reports.append(report)
                 med_b = extract_medians(report, args.baseline)
                 med_c = extract_medians(report, args.candidate)
@@ -774,7 +786,14 @@ def main():
                     resamples=resamples)
                 session['bench_path'] = str(path.resolve())
                 session['samples_jsonl'] = report.get('samples_jsonl')
-                session['run_id'] = report.get('run_id')
+                session['run_id'] = report['run_id']
+                session['identity'] = {
+                    'host': report['host'], 'machine': report['machine'],
+                    'clang': report['clang'], 'sizes': report['measure_sizes'],
+                    'variants': {name: {key: report['variants'][name][key] for key in
+                        ('source_sha256', 'harness_sha256', 'abi_wrap_sha256', 'compiler_identity')}
+                        for name in (args.baseline, args.candidate)},
+                }
                 sessions.append(session)
                 print(f'session{i} decision={session["decision"]} '
                       f'agg={session.get("bootstrap", {}).get("aggregate_speedup")} '
@@ -837,7 +856,7 @@ def main():
                 verify_binary(binary, record, run_dir=run_dir)
                 oracle_result = oracle_check(binary, run_dir)
                 finalize_verified(record, oracle_result)
-            except (RuntimeError, subprocess.CalledProcessError):
+            except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 if record.get('lifecycle') != LIFECYCLE_FAILED:
                     mark_failed(record, 'verify_or_oracle_failed', run_dir=run_dir)
                 raise

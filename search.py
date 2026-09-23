@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import signal
+import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -172,7 +175,7 @@ class SearchController:
             else:
                 # Correct-but-no-improve and failures both count toward stagnation
                 # when the attempt completed evaluation (not skip-only duplicates above).
-                if attempt.stage in ('verified', 'failed', 'built'):
+                if attempt.stage in ('imported', 'verified', 'measured', 'failed', 'built'):
                     state['consecutive_no_improve'] += 1
 
             self.save(state)
@@ -185,7 +188,7 @@ def default_evaluate_attempt(root: Path, search_dir: Path, proposal: Dict[str, A
                              index: int) -> AttemptRecord:
     """Import + record stages without promoting; used by unit tests / dry path.
 
-    Native compile/verify is wired from lab.search_native_evaluate.
+    CLI search explicitly uses native_evaluate_attempt; this path only imports.
     """
     attempt_id = uuid.uuid4().hex[:12]
     run_dir = search_dir / 'attempts' / f'{index:04d}_{attempt_id}'
@@ -200,7 +203,7 @@ def default_evaluate_attempt(root: Path, search_dir: Path, proposal: Dict[str, A
             stage='failed',
             detail={'error': str(exc), 'phase': 'import'},
         )
-    # Dry evaluation: treat successful import as verified-without-improve for budgets.
+    # A successful import provides no correctness evidence.
     atomic_write_json(run_dir / 'attempt.json', {
         'attempt_id': attempt_id,
         'imported': imported,
@@ -210,7 +213,7 @@ def default_evaluate_attempt(root: Path, search_dir: Path, proposal: Dict[str, A
         attempt_id=attempt_id,
         candidate_id=proposal['candidate_id'],
         source_sha256=imported['source_sha256'],
-        stage='verified',
+        stage='imported',
         detail={'improved': False, 'score': None, 'imported': imported, 'dry': True},
     )
 
@@ -223,3 +226,59 @@ def refuse_stale_promotion(record: Dict[str, Any], promote: Callable[[], None]) 
     if record.get('verification', {}).get('state') != 'pass':
         raise RuntimeError('refusing to promote unverified candidate')
     promote()
+
+
+def native_evaluate_attempt(root, search_dir, proposal, index):
+    """Run the existing native evaluator in a child; never manufacture a PASS.
+
+    Measurement is a pipeline check, not a paired promotion session. Search
+    records no improvement until a separate comparison gate has passed.
+    """
+    attempt_id = uuid.uuid4().hex[:12]
+    dest = search_dir / 'attempts' / f'{index:04d}_{attempt_id}'
+    dest.mkdir(parents=True, exist_ok=False)
+    proposal_path = dest / 'input.json'
+    atomic_write_json(proposal_path, proposal)
+    output = dest / 'measurement.json'
+    state = load_search_state(search_dir / 'search_state.json')
+    remaining = state['budgets']['max_seconds'] - (time.time() - state['wall_started'])
+    detail = {'improved': False, 'score': None, 'report': str(output),
+              'promotion': 'requires_independent_paired_sessions'}
+    stage = 'failed'
+    try:
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired('evaluate-proposal', 0)
+        child = subprocess.Popen(
+            [sys.executable, str(root / 'lab.py'), 'evaluate-proposal',
+             '--proposal', str(proposal_path), '--output', str(output)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=root, start_new_session=True)
+        try:
+            stdout, stderr = child.communicate(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            # Kill the evaluator and its compiler/native descendants together.
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = child.communicate()
+            (dest / 'stdout.log').write_text(stdout)
+            (dest / 'stderr.log').write_text(stderr)
+            raise
+        (dest / 'stdout.log').write_text(stdout)
+        (dest / 'stderr.log').write_text(stderr)
+        detail['returncode'] = child.returncode
+        if child.returncode == 0:
+            report = json.loads(output.read_text())
+            variant = report['variants'][proposal['candidate_id']]
+            if (variant['lifecycle'] != 'measured' or
+                    variant['verification']['state'] != 'pass' or
+                    variant['oracle']['state'] != 'pass' or not variant['sizes']):
+                raise ValueError('Native evaluator did not provide measured verification evidence')
+            stage = 'measured'
+    except (subprocess.TimeoutExpired, OSError, ValueError, KeyError) as exc:
+        detail['error'] = str(exc)
+    result = AttemptRecord(attempt_id, proposal['candidate_id'],
+                           sha256_text(proposal['source']), stage, detail=detail)
+    atomic_write_json(dest / 'attempt.json', asdict(result))
+    return result

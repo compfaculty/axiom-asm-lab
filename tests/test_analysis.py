@@ -14,7 +14,7 @@ from analysis import (
 )
 
 
-def _paired_constant(b, c, sizes=('4', '16', '64'), n=20):
+def _paired_constant(b, c, sizes=('4', '16', '64'), n=30):
     return {s: [(b, c)] * n for s in sizes}
 
 
@@ -76,9 +76,31 @@ class AnalysisTests(unittest.TestCase):
         self.assertFalse(one['speed_claim'])
         self.assertEqual(one['decision'], 'needs_second_session')
         b = classify_session(med_b, med_c, paired=paired, bootstrap_seed=2, resamples=500)
+        a.update(run_id='a', identity={'test': 'same-artifacts'})
+        b.update(run_id='b', identity={'test': 'same-artifacts'})
         two = classify_promotion(a, b)
         self.assertTrue(two['speed_claim'])
         self.assertEqual(two['decision'], 'promoted')
+
+    def test_no_raw_samples_no_promotion(self):
+        result = classify_session({'64': 100}, {'64': 50})
+        self.assertFalse(result['promote_eligible'])
+
+    def test_insufficient_samples_no_promotion(self):
+        result = classify_session({'64': 100}, {'64': 50}, {'64': [(100, 50)] * 29})
+        self.assertFalse(result['promote_eligible'])
+
+    def test_duplicate_session_no_promotion(self):
+        session = {'promote_eligible': True, 'run_id': 'same', 'identity': {'a': 1}}
+        self.assertFalse(classify_promotion(session, session)['speed_claim'])
+
+    def test_artifact_mismatch_no_promotion(self):
+        a = {'promote_eligible': True, 'run_id': 'a', 'identity': {'source': 'x'}}
+        b = {'promote_eligible': True, 'run_id': 'b', 'identity': {'source': 'y'}}
+        self.assertFalse(classify_promotion(a, b)['speed_claim'])
+
+    def test_precise_regression_ceiling(self):
+        self.assertEqual(regression_violations({'64': 1 / 1.0305}), ['64'])
 
     def test_bootstrap_seed_reproducible(self):
         paired = _paired_constant(100.0, 80.0, n=15)

@@ -27,6 +27,12 @@ class ProposalTests(unittest.TestCase):
         with self.assertRaises(ProposalError):
             validate_proposal(p, ROOT)
 
+    def test_sum_source_cannot_claim_other_kernel(self):
+        proposal = mock_propose(ROOT)
+        proposal['kernel_id'] = 'find_u8'
+        with self.assertRaises(ProposalError):
+            validate_proposal(proposal, ROOT)
+
     def test_unknown_kernel(self):
         p = _valid()
         p['kernel_id'] = 'not_a_kernel'
