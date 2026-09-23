@@ -53,3 +53,10 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - Evidence: `evidence/T006.md`. Status: T006 `done`.
 - Next task: T007 — comparison and report (paired bootstrap).
 - Next command: implement seeded paired bootstrap, per-size ratios, aggregate objective, regression ceiling.
+
+## 2026-09-24 — T007 comparison and report (M003 complete)
+- Change: `analysis.py` paired bootstrap / promotion gates; `lab.py compare` + otool disassembly capture; synthetic classification tests.
+- Commands/results: unittest 45 OK; compare one/two session exits 0; verify 0 with disasm_*.txt.
+- Evidence: `evidence/T007.md`. Status: T007 `done`. M003 complete; milestone → M004.
+- Next task: T008 — offline proposal pipeline.
+- Next command: proposal schema validation, mock proposer, immutable importer.

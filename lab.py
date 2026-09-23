@@ -137,6 +137,17 @@ def compile_one(name, source, run_dir):
     return binary, record
 
 
+def capture_disassembly(binary, run_dir, name):
+    """Capture native disassembly for the harness binary (otool on macOS)."""
+    if not shutil.which('otool'):
+        raise RuntimeError('otool missing; required for disassembly capture')
+    text = run(['otool', '-tV', str(binary)], timeout=60)
+    path = Path(run_dir) / ('disasm_' + name + '.txt')
+    refuse_overwrite(path)
+    path.write_text(text + '\n')
+    return path
+
+
 def append_diagnostic(record, kind, detail):
     entry = {
         'kind': kind,
@@ -469,6 +480,14 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('doctor')
     sub.add_parser('fault-matrix')
+    cmp_cmd = sub.add_parser('compare')
+    cmp_cmd.add_argument('--baseline', default='clang_o3')
+    cmp_cmd.add_argument('--candidate', required=True)
+    cmp_cmd.add_argument('--session', action='append', type=Path, required=True,
+                         help='Bench JSON path; pass twice for a speed claim')
+    cmp_cmd.add_argument('--bootstrap-seed', type=int, default=1)
+    cmp_cmd.add_argument('--resamples', type=int, default=None)
+    cmp_cmd.add_argument('--output', type=Path, default=None)
     for action in ('verify', 'bench'):
         cmd = sub.add_parser(action)
         cmd.add_argument('--candidate', help='Filename stem in candidates/')
@@ -488,6 +507,55 @@ def main():
         doctor()
         if args.command == 'doctor':
             print(platform.platform(), clang_identity())
+            return
+        if args.command == 'compare':
+            from analysis import (
+                BOOTSTRAP_RESAMPLES,
+                classify_promotion,
+                classify_session,
+                extract_medians,
+                extract_paired_ns,
+            )
+            if not 1 <= len(args.session) <= 2:
+                parser.error('compare requires one or two --session paths')
+            resamples = args.resamples if args.resamples is not None else BOOTSTRAP_RESAMPLES
+            sessions = []
+            reports = []
+            for i, path in enumerate(args.session):
+                report = json.loads(path.read_text())
+                reports.append(report)
+                med_b = extract_medians(report, args.baseline)
+                med_c = extract_medians(report, args.candidate)
+                paired = extract_paired_ns(report, args.baseline, args.candidate)
+                session = classify_session(
+                    med_b, med_c, paired=paired,
+                    bootstrap_seed=args.bootstrap_seed + i,
+                    resamples=resamples)
+                session['bench_path'] = str(path.resolve())
+                session['samples_jsonl'] = report.get('samples_jsonl')
+                session['run_id'] = report.get('run_id')
+                sessions.append(session)
+                print(f'session{i} decision={session["decision"]} '
+                      f'agg={session.get("bootstrap", {}).get("aggregate_speedup")} '
+                      f'ci_low={session.get("bootstrap", {}).get("ci_low")}',
+                      flush=True)
+            promo = classify_promotion(sessions[0], sessions[1] if len(sessions) > 1 else None)
+            print('promotion', promo['decision'], 'speed_claim=' + str(promo['speed_claim']),
+                  flush=True)
+            out_payload = {
+                'schema': 1,
+                'baseline': args.baseline,
+                'candidate': args.candidate,
+                'sessions': sessions,
+                'promotion': promo,
+            }
+            if args.output:
+                refuse_overwrite(args.output.resolve())
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(json.dumps(out_payload, indent=2) + '\n')
+                print('Saved ' + str(args.output.resolve()))
+            else:
+                print(json.dumps(out_payload, indent=2))
             return
         if args.command == 'fault-matrix':
             run_id, run_dir = new_run_dir()
@@ -535,6 +603,8 @@ def main():
             print(name + ': PASS', flush=True)
             records[name] = record
             binaries[name] = binary
+            disasm = capture_disassembly(binary, run_dir, name)
+            record['disassembly'] = str(disasm.resolve())
 
         if args.command == 'verify':
             write_manifest(run_dir, run_id, 'verify', records)
@@ -567,6 +637,7 @@ def main():
                 'verification': record['verification'],
                 'oracle': record['oracle'],
                 'diagnostics': record.get('diagnostics'),
+                'disassembly': record.get('disassembly'),
                 'calibration': {},
                 'sizes': {},
             }
