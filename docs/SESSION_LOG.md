@@ -18,3 +18,10 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - Blockers: none for T001. M001 still incomplete until T002.
 - Next task: T002 — Make bootstrap artifacts traceable.
 - Next command: inspect `lab.py` build/artifact paths, then implement T002 acceptance (hashes, unique run dirs, invalidate-on-edit).
+
+## 2026-09-24 — T002 artifact traceability
+- Change: `lab.py` unique `build/runs/<id>/` with manifests (build argv, compiler identity, source/harness/binary hashes, verification state); refuse overwrite; reject builtin candidate collisions; `ensure_fresh` invalidates on source/harness edit. Extended `tests/test_controller.py`.
+- Commands/results: unittest 12 OK exit 0; `lab.py verify` 0; `lab.py bench --samples 15` 0 (unique results path); overwrite re-bench exit 1 as required.
+- Evidence: `evidence/T002.md`. Status: T002 `done`. M001 tasks complete.
+- Next task: T003 — Define contract-driven test generation.
+- Next command: extract kernel metadata and independent wrapping oracle; add seeded distributions and boundary lengths (`docs/IMPLEMENTATION_PLAN.md` T003).

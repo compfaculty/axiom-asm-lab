@@ -9,11 +9,19 @@ import shutil
 import statistics
 import subprocess
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+HARNESS = ROOT / 'src' / 'harness.c'
 SIZES = (0, 1, 3, 4, 7, 16, 64, 1024, 65536, 1048576)
+BUILTIN_SOURCES = {
+    'clang_o3': ROOT / 'src' / 'reference.c',
+    'scalar': ROOT / 'asm' / 'scalar.s',
+    'unrolled4': ROOT / 'asm' / 'unrolled4.s',
+}
+NAME_RE = re.compile(r'^[A-Za-z0-9_-]+$')
 
 
 def doctor():
@@ -30,32 +38,140 @@ def run(args, timeout=120):
                           timeout=timeout).stdout.strip()
 
 
+def sha256_file(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def clang_identity():
+    return run(['clang', '--version']).splitlines()[0]
+
+
 def sources(candidate=None):
-    if candidate:
-        if not re.fullmatch(r'[A-Za-z0-9_-]+', candidate):
-            raise ValueError('Candidate name must be a simple filename stem')
-        path = ROOT / 'candidates' / (candidate + '.s')
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        return {candidate: path}
-    return {'clang_o3': ROOT / 'src/reference.c',
-            'scalar': ROOT / 'asm/scalar.s',
-            'unrolled4': ROOT / 'asm/unrolled4.s'}
+    if candidate is None:
+        return dict(BUILTIN_SOURCES)
+    if not NAME_RE.fullmatch(candidate):
+        raise ValueError('Candidate name must be a simple filename stem')
+    if candidate in BUILTIN_SOURCES:
+        raise ValueError('Candidate name collides with built-in: ' + candidate)
+    path = ROOT / 'candidates' / (candidate + '.s')
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return {candidate: path}
 
 
-def compile_one(name, source):
-    build = ROOT / 'build'
-    build.mkdir(exist_ok=True)
-    binary = build / ('harness_' + name)
-    run(['clang', '-O3', '-std=c11', '-Wall', '-Wextra',
-         str(ROOT / 'src/harness.c'), str(source), '-o', str(binary)])
-    return binary
+def new_run_dir():
+    """Create a unique immutable run directory under build/runs/."""
+    runs = ROOT / 'build' / 'runs'
+    runs.mkdir(parents=True, exist_ok=True)
+    for _ in range(8):
+        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')
+        run_id = stamp + '_' + uuid.uuid4().hex[:8]
+        path = runs / run_id
+        try:
+            path.mkdir(exist_ok=False)
+            return run_id, path
+        except FileExistsError:
+            continue
+    raise RuntimeError('Unable to allocate unique run directory')
 
 
-def verify(binary):
+def default_bench_output(run_id):
+    return ROOT / 'results' / 'runs' / run_id / 'bench.json'
+
+
+def refuse_overwrite(path):
+    path = Path(path)
+    if path.exists():
+        raise FileExistsError('Refusing to overwrite existing artifact: ' + str(path))
+
+
+def compile_one(name, source, run_dir):
+    if not HARNESS.is_file():
+        raise FileNotFoundError(HARNESS)
+    if not Path(source).is_file():
+        raise FileNotFoundError(source)
+    binary = run_dir / ('harness_' + name)
+    refuse_overwrite(binary)
+    argv = ['clang', '-O3', '-std=c11', '-Wall', '-Wextra',
+            str(HARNESS), str(source), '-o', str(binary)]
+    run(argv)
+    record = {
+        'name': name,
+        'source_path': str(Path(source).resolve()),
+        'source_sha256': sha256_file(source),
+        'harness_path': str(HARNESS.resolve()),
+        'harness_sha256': sha256_file(HARNESS),
+        'binary_path': str(binary.resolve()),
+        'binary_sha256': sha256_file(binary),
+        'binary_bytes': binary.stat().st_size,
+        'build_argv': argv,
+        'compiler_identity': clang_identity(),
+        'verification': {'state': 'built', 'output': None},
+    }
+    return binary, record
+
+
+def verify_binary(binary, record):
+    """Run verify and record state; require source/harness hashes still current."""
+    ensure_fresh(record)
     output = run([str(binary), 'verify'], timeout=60)
     if output != 'PASS':
+        record['verification'] = {'state': 'failed', 'output': output}
         raise RuntimeError('Unexpected verification output: ' + output)
+    record['verification'] = {
+        'state': 'pass',
+        'output': output,
+        'source_sha256_at_verify': sha256_file(record['source_path']),
+        'harness_sha256_at_verify': sha256_file(HARNESS),
+        'binary_sha256_at_verify': sha256_file(binary),
+    }
+    return output
+
+
+def ensure_fresh(record):
+    """Invalidate verification if source or harness changed since build/verify."""
+    src = Path(record['source_path'])
+    if not src.is_file():
+        raise FileNotFoundError('Source missing after build: ' + str(src))
+    if not HARNESS.is_file():
+        raise FileNotFoundError(HARNESS)
+    src_hash = sha256_file(src)
+    harness_hash = sha256_file(HARNESS)
+    if src_hash != record['source_sha256']:
+        record['verification'] = {'state': 'stale', 'reason': 'source hash mismatch'}
+        raise RuntimeError('Source changed after build; previous verification invalid for '
+                           + record['name'])
+    if harness_hash != record['harness_sha256']:
+        record['verification'] = {'state': 'stale', 'reason': 'harness hash mismatch'}
+        raise RuntimeError('Harness changed after build; previous verification invalid for '
+                           + record['name'])
+    ver = record.get('verification') or {}
+    if ver.get('state') == 'pass':
+        if (ver.get('source_sha256_at_verify') != src_hash
+                or ver.get('harness_sha256_at_verify') != harness_hash):
+            record['verification'] = {'state': 'stale', 'reason': 'post-verify hash mismatch'}
+            raise RuntimeError('Artifacts changed after verify; measurement refused for '
+                               + record['name'])
+
+
+def write_manifest(run_dir, run_id, command, records, extra=None):
+    manifest = {
+        'schema': 1,
+        'run_id': run_id,
+        'command': command,
+        'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+        'host': platform.platform(),
+        'machine': platform.machine(),
+        'compiler_identity': clang_identity(),
+        'harness_sha256': sha256_file(HARNESS),
+        'variants': records,
+    }
+    if extra:
+        manifest.update(extra)
+    path = run_dir / 'manifest.json'
+    refuse_overwrite(path)
+    path.write_text(json.dumps(manifest, indent=2) + '\n')
+    return path
 
 
 def main():
@@ -67,42 +183,89 @@ def main():
         cmd.add_argument('--candidate', help='Filename stem in candidates/')
         if action == 'bench':
             cmd.add_argument('--samples', type=int, default=15)
-            cmd.add_argument('--output', type=Path, default=ROOT / 'results/run.json')
+            cmd.add_argument('--output', type=Path, default=None,
+                             help='Bench JSON path (must not already exist)')
     args = parser.parse_args()
     try:
         doctor()
         if args.command == 'doctor':
-            print(platform.platform(), run(['clang', '--version']).splitlines()[0]); return
+            print(platform.platform(), clang_identity())
+            return
         if args.command == 'bench' and not 3 <= args.samples <= 100:
             parser.error('--samples must be between 3 and 100')
-        entries = {}
+
+        # Resolve output early so we never measure into a doomed overwrite.
+        early_output = args.output.resolve() if (args.command == 'bench' and args.output) else None
+        if early_output is not None:
+            refuse_overwrite(early_output)
+
+        run_id, run_dir = new_run_dir()
+        records = {}
+        binaries = {}
         for name, source in sources(args.candidate).items():
-            binary = compile_one(name, source)
-            verify(binary)
+            binary, record = compile_one(name, source, run_dir)
+            verify_binary(binary, record)
             print(name + ': PASS', flush=True)
-            if args.command == 'bench':
-                entries[name] = {'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
-                                 'binary_bytes': binary.stat().st_size, 'sizes': {}}
-        if args.command != 'bench': return
-        # Interleave candidates per size to reduce bias from sustained clock drift.
+            records[name] = record
+            binaries[name] = binary
+
+        if args.command == 'verify':
+            write_manifest(run_dir, run_id, 'verify', records)
+            print('Run ' + run_id + ' -> ' + str(run_dir / 'manifest.json'))
+            return
+
+        entries = {}
+        for name, record in records.items():
+            ensure_fresh(record)
+            entries[name] = {
+                'source_sha256': record['source_sha256'],
+                'harness_sha256': record['harness_sha256'],
+                'binary_sha256': record['binary_sha256'],
+                'binary_bytes': record['binary_bytes'],
+                'build_argv': record['build_argv'],
+                'compiler_identity': record['compiler_identity'],
+                'verification': record['verification'],
+                'sizes': {},
+            }
+
         for n in SIZES:
             for name in entries:
-                binary = ROOT / 'build' / ('harness_' + name)
-                samples = [float(s) for s in run([str(binary), 'bench', str(n),
-                                                   str(args.samples)], timeout=180).splitlines()]
+                ensure_fresh(records[name])
+                if records[name]['verification'].get('state') != 'pass':
+                    raise RuntimeError('Refusing to measure unverified variant: ' + name)
+                samples = [float(s) for s in run(
+                    [str(binaries[name]), 'bench', str(n), str(args.samples)],
+                    timeout=180).splitlines()]
                 entries[name]['sizes'][str(n)] = {
-                    'ns_per_call': samples, 'median_ns': statistics.median(samples)}
-                print(f'{name:12} n={n:8} median={statistics.median(samples):12.3f} ns', flush=True)
-        report = {'schema': 1, 'timestamp_utc': datetime.now(timezone.utc).isoformat(),
-                  'host': platform.platform(), 'machine': platform.machine(),
-                  'clang': run(['clang', '--version']).splitlines()[0],
-                  'samples_per_size': args.samples, 'variants': entries}
-        output = args.output.resolve()
+                    'ns_per_call': samples,
+                    'median_ns': statistics.median(samples),
+                }
+                print(f'{name:12} n={n:8} median={statistics.median(samples):12.3f} ns',
+                      flush=True)
+
+        output = early_output if early_output is not None else default_bench_output(run_id)
+        refuse_overwrite(output)
         output.parent.mkdir(parents=True, exist_ok=True)
+        report = {
+            'schema': 1,
+            'run_id': run_id,
+            'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+            'host': platform.platform(),
+            'machine': platform.machine(),
+            'clang': clang_identity(),
+            'samples_per_size': args.samples,
+            'run_dir': str(run_dir.resolve()),
+            'variants': entries,
+        }
         output.write_text(json.dumps(report, indent=2) + '\n')
+        write_manifest(run_dir, run_id, 'bench', records, {
+            'bench_output': str(output.resolve()),
+            'samples_per_size': args.samples,
+        })
         print('Saved ' + str(output))
-    except (RuntimeError, FileNotFoundError, subprocess.CalledProcessError,
-            subprocess.TimeoutExpired, ValueError) as exc:
+        print('Run ' + run_id + ' -> ' + str(run_dir / 'manifest.json'))
+    except (RuntimeError, FileNotFoundError, FileExistsError,
+            subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError) as exc:
         print('ERROR: ' + str(exc), file=sys.stderr)
         if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
             print(exc.stderr, file=sys.stderr)
