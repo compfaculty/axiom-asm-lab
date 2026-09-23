@@ -67,3 +67,10 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - Evidence: `evidence/T008.md`. Status: T008 `done`.
 - Next task: T009 — bounded search and resume.
 - Next command: proposal/time/stagnation budgets with resumable state.
+
+## 2026-09-24 — T009 bounded search and resume (M004 complete)
+- Change: `search.py` budgets (proposals/time/stagnation), atomic `search_state.json`, resume-by-hash, offline provider interface; `lab.py search`.
+- Commands/results: unittest 59 OK; search stops on max_proposals/max_stagnation/max_seconds; resume extends attempts.
+- Evidence: `evidence/T009.md`. Status: T009 `done`. Milestone → M005.
+- Next task: T010 — expand kernels and machine experiments.
+- Next command: add byte search and stable filter/map kernel contracts.

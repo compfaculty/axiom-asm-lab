@@ -483,6 +483,15 @@ def main():
     mock_p = sub.add_parser('propose-mock')
     mock_p.add_argument('--candidate-id', default='mock_scalar_copy')
     mock_p.add_argument('--output', type=Path, default=None)
+    search_cmd = sub.add_parser('search')
+    search_cmd.add_argument('--dir', type=Path, required=True,
+                            help='Search directory for atomic state')
+    search_cmd.add_argument('--resume', action='store_true')
+    search_cmd.add_argument('--max-proposals', type=int, default=20)
+    search_cmd.add_argument('--max-seconds', type=float, default=1800.0)
+    search_cmd.add_argument('--max-stagnation', type=int, default=5)
+    search_cmd.add_argument('--provider', default='offline',
+                            help='offline (default) or online (requires config)')
     ev = sub.add_parser('evaluate-proposal')
     ev.add_argument('--proposal', type=Path, default=None,
                     help='JSON proposal path (omit with --mock)')
@@ -530,6 +539,23 @@ def main():
                 print('Saved ' + str(args.output.resolve()))
             else:
                 sys.stdout.write(text)
+            return
+        if args.command == 'search':
+            from search import SearchBudgets, SearchController, get_provider
+            provider = get_provider(args.provider)
+            budgets = SearchBudgets(
+                max_proposals=args.max_proposals,
+                max_seconds=args.max_seconds,
+                max_stagnation=args.max_stagnation,
+            )
+            ctrl = SearchController(ROOT, args.dir.resolve(), budgets, provider=provider)
+            state = ctrl.run(resume=args.resume)
+            print(json.dumps({
+                'status': state.get('status'),
+                'stop_reason': state.get('stop_reason'),
+                'attempts': len(state.get('attempts') or []),
+                'state': str(ctrl.state_path),
+            }, indent=2))
             return
         if args.command == 'evaluate-proposal':
             from proposals import import_proposal, mock_propose, validate_proposal
