@@ -39,3 +39,10 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - Evidence: `evidence/T004.md`. Status: T004 `done`.
 - Next task: T005 — enforce verification before timing.
 - Next command: implement lifecycle states and prevent measurement after failed/stale checks.
+
+## 2026-09-24 — T005 lifecycle before timing (M002 complete)
+- Change: explicit lifecycle (`built`/`verified`/`failed`/`stale`/`measured`), `assert_measurable`, retained diagnostics JSON; fault-matrix continues after child faults.
+- Commands/results: unittest 31 OK; verify 0 (lifecycle=verified); fault-matrix 0; wrong_sum 1 with diagnostics file.
+- Evidence: `evidence/T005.md`. Status: T005 `done`. M002 (T003–T005) complete; `current_milestone=M003`.
+- Next task: T006 — reproducible native sampling.
+- Next command: calibrate iterations; randomized paired order with seed; raw samples + memory caps.

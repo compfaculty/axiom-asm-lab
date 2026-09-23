@@ -35,6 +35,12 @@ FAULT_MATRIX = {
     'infinite_loop': ('timed_out', 'probe'),
 }
 NAME_RE = re.compile(r'^[A-Za-z0-9_-]+$')
+# Artifact lifecycle: built -> verified -> measured; failed/stale are terminal for timing.
+LIFECYCLE_BUILT = 'built'
+LIFECYCLE_VERIFIED = 'verified'
+LIFECYCLE_FAILED = 'failed'
+LIFECYCLE_STALE = 'stale'
+LIFECYCLE_MEASURED = 'measured'
 
 
 def doctor():
@@ -112,32 +118,89 @@ def compile_one(name, source, run_dir):
     run(argv)
     record = {
         'name': name,
+        'lifecycle': LIFECYCLE_BUILT,
         'source_path': str(Path(source).resolve()),
         'source_sha256': sha256_file(source),
         'harness_path': str(HARNESS.resolve()),
         'harness_sha256': sha256_file(HARNESS),
+        'abi_wrap_path': str(ABI_WRAP.resolve()),
+        'abi_wrap_sha256': sha256_file(ABI_WRAP),
         'binary_path': str(binary.resolve()),
         'binary_sha256': sha256_file(binary),
         'binary_bytes': binary.stat().st_size,
         'build_argv': argv,
         'compiler_identity': clang_identity(),
         'verification': {'state': 'built', 'output': None},
+        'diagnostics': [],
     }
     return binary, record
 
 
-def verify_binary(binary, record):
+def append_diagnostic(record, kind, detail):
+    entry = {
+        'kind': kind,
+        'detail': detail,
+        'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+        'lifecycle': record.get('lifecycle'),
+        'source_sha256': record.get('source_sha256'),
+        'harness_sha256': record.get('harness_sha256'),
+        'binary_sha256': record.get('binary_sha256'),
+    }
+    record.setdefault('diagnostics', []).append(entry)
+    return entry
+
+
+def persist_diagnostics(run_dir, record):
+    """Write retained diagnostics for a variant (immutable per write)."""
+    path = Path(run_dir) / ('diagnostics_' + record['name'] + '.json')
+    refuse_overwrite(path)
+    payload = {
+        'name': record['name'],
+        'lifecycle': record.get('lifecycle'),
+        'verification': record.get('verification'),
+        'oracle': record.get('oracle'),
+        'diagnostics': record.get('diagnostics') or [],
+    }
+    path.write_text(json.dumps(payload, indent=2) + '\n')
+    return path
+
+
+def mark_failed(record, reason, output=None, run_dir=None):
+    record['lifecycle'] = LIFECYCLE_FAILED
+    record['verification'] = {
+        'state': 'failed',
+        'output': output,
+        'reason': reason,
+    }
+    append_diagnostic(record, 'verification_failed', reason)
+    if run_dir is not None:
+        persist_diagnostics(run_dir, record)
+
+
+def mark_stale(record, reason):
+    record['lifecycle'] = LIFECYCLE_STALE
+    record['verification'] = {'state': 'stale', 'reason': reason}
+    append_diagnostic(record, 'stale', reason)
+
+
+def verify_binary(binary, record, run_dir=None):
     """Run verify and record state; require source/harness hashes still current."""
     ensure_fresh(record)
-    output = run([str(binary), 'verify'], timeout=60)
+    try:
+        output = run([str(binary), 'verify'], timeout=60)
+    except subprocess.CalledProcessError as exc:
+        mark_failed(record, 'verify_process_failed',
+                    output=(exc.stderr or exc.stdout or str(exc)), run_dir=run_dir)
+        raise
     if output != 'PASS':
-        record['verification'] = {'state': 'failed', 'output': output}
+        mark_failed(record, 'unexpected_verify_output', output=output, run_dir=run_dir)
         raise RuntimeError('Unexpected verification output: ' + output)
     record['verification'] = {
         'state': 'pass',
         'output': output,
         'source_sha256_at_verify': sha256_file(record['source_path']),
         'harness_sha256_at_verify': sha256_file(HARNESS),
+        'abi_wrap_sha256_at_verify': sha256_file(ABI_WRAP),
         'binary_sha256_at_verify': sha256_file(binary),
     }
     return output
@@ -171,28 +234,64 @@ def oracle_check(binary, run_dir, seed=ORACLE_SEED):
     return result
 
 
+def finalize_verified(record, oracle_result):
+    if oracle_result.get('state') != 'pass':
+        record['lifecycle'] = LIFECYCLE_FAILED
+        append_diagnostic(record, 'oracle_failed', oracle_result)
+        raise RuntimeError('Oracle check failed for ' + record['name'])
+    record['oracle'] = oracle_result
+    record['lifecycle'] = LIFECYCLE_VERIFIED
+    append_diagnostic(record, 'verified', {'oracle_cases': oracle_result.get('case_count')})
+
+
+def assert_measurable(record):
+    """Refuse timing unless lifecycle is verified and artifact hashes still match."""
+    if record.get('lifecycle') == LIFECYCLE_FAILED:
+        raise RuntimeError('Refusing to measure failed variant: ' + record['name'])
+    if record.get('lifecycle') == LIFECYCLE_STALE:
+        raise RuntimeError('Refusing to measure stale variant: ' + record['name'])
+    if record.get('lifecycle') != LIFECYCLE_VERIFIED:
+        raise RuntimeError('Refusing to measure; lifecycle is '
+                           + str(record.get('lifecycle')) + ' for ' + record['name'])
+    ensure_fresh(record)
+    if record['verification'].get('state') != 'pass':
+        raise RuntimeError('Refusing to measure unverified variant: ' + record['name'])
+    oracle = record.get('oracle') or {}
+    if oracle.get('state') != 'pass':
+        raise RuntimeError('Refusing to measure without oracle pass: ' + record['name'])
+
+
 def ensure_fresh(record):
-    """Invalidate verification if source or harness changed since build/verify."""
+    """Invalidate verification if source, harness, or abi wrap changed since build/verify."""
     src = Path(record['source_path'])
     if not src.is_file():
         raise FileNotFoundError('Source missing after build: ' + str(src))
     if not HARNESS.is_file():
         raise FileNotFoundError(HARNESS)
+    if not ABI_WRAP.is_file():
+        raise FileNotFoundError(ABI_WRAP)
     src_hash = sha256_file(src)
     harness_hash = sha256_file(HARNESS)
+    abi_hash = sha256_file(ABI_WRAP)
     if src_hash != record['source_sha256']:
-        record['verification'] = {'state': 'stale', 'reason': 'source hash mismatch'}
+        mark_stale(record, 'source hash mismatch')
         raise RuntimeError('Source changed after build; previous verification invalid for '
                            + record['name'])
     if harness_hash != record['harness_sha256']:
-        record['verification'] = {'state': 'stale', 'reason': 'harness hash mismatch'}
+        mark_stale(record, 'harness hash mismatch')
         raise RuntimeError('Harness changed after build; previous verification invalid for '
+                           + record['name'])
+    if abi_hash != record.get('abi_wrap_sha256', abi_hash):
+        mark_stale(record, 'abi_wrap hash mismatch')
+        raise RuntimeError('ABI wrapper changed after build; previous verification invalid for '
                            + record['name'])
     ver = record.get('verification') or {}
     if ver.get('state') == 'pass':
         if (ver.get('source_sha256_at_verify') != src_hash
-                or ver.get('harness_sha256_at_verify') != harness_hash):
-            record['verification'] = {'state': 'stale', 'reason': 'post-verify hash mismatch'}
+                or ver.get('harness_sha256_at_verify') != harness_hash
+                or (ver.get('abi_wrap_sha256_at_verify')
+                    and ver.get('abi_wrap_sha256_at_verify') != abi_hash)):
+            mark_stale(record, 'post-verify hash mismatch')
             raise RuntimeError('Artifacts changed after verify; measurement refused for '
                                + record['name'])
 
@@ -289,11 +388,25 @@ def fault_matrix(run_dir=None):
         timeout = 1.0 if name == 'infinite_loop' else 30.0
         child = run_child([str(binary), probe_cmd], timeout=timeout)
         ok = child['classification'] == expected
+        if child['classification'] == 'pass':
+            record['lifecycle'] = LIFECYCLE_VERIFIED
+            record['verification'] = {'state': 'pass', 'output': (child['stdout'] or '').strip()}
+        else:
+            record['lifecycle'] = LIFECYCLE_FAILED
+            append_diagnostic(record, 'fault_matrix', {
+                'expected': expected,
+                'observed': child['classification'],
+                'returncode': child['returncode'],
+                'stderr_tail': (child['stderr'] or '')[-400:],
+            })
+            persist_diagnostics(run_dir, record)
+            # Surviving child faults: continue remaining fixtures.
         results[name] = {
             'expected': expected,
             'observed': child['classification'],
             'probe_cmd': probe_cmd,
             'ok': ok,
+            'lifecycle': record['lifecycle'],
             'returncode': child['returncode'],
             'timed_out': child['timed_out'],
             'stderr_tail': (child['stderr'] or '')[-400:],
@@ -361,8 +474,14 @@ def main():
         binaries = {}
         for name, source in sources(args.candidate).items():
             binary, record = compile_one(name, source, run_dir)
-            verify_binary(binary, record)
-            record['oracle'] = oracle_check(binary, run_dir)
+            try:
+                verify_binary(binary, record, run_dir=run_dir)
+                oracle_result = oracle_check(binary, run_dir)
+                finalize_verified(record, oracle_result)
+            except (RuntimeError, subprocess.CalledProcessError):
+                if record.get('lifecycle') != LIFECYCLE_FAILED:
+                    mark_failed(record, 'verify_or_oracle_failed', run_dir=run_dir)
+                raise
             print(name + ': PASS', flush=True)
             records[name] = record
             binaries[name] = binary
@@ -374,24 +493,25 @@ def main():
 
         entries = {}
         for name, record in records.items():
-            ensure_fresh(record)
+            assert_measurable(record)
             entries[name] = {
+                'lifecycle': record['lifecycle'],
                 'source_sha256': record['source_sha256'],
                 'harness_sha256': record['harness_sha256'],
+                'abi_wrap_sha256': record['abi_wrap_sha256'],
                 'binary_sha256': record['binary_sha256'],
                 'binary_bytes': record['binary_bytes'],
                 'build_argv': record['build_argv'],
                 'compiler_identity': record['compiler_identity'],
                 'verification': record['verification'],
                 'oracle': record['oracle'],
+                'diagnostics': record.get('diagnostics'),
                 'sizes': {},
             }
 
         for n in SIZES:
             for name in entries:
-                ensure_fresh(records[name])
-                if records[name]['verification'].get('state') != 'pass':
-                    raise RuntimeError('Refusing to measure unverified variant: ' + name)
+                assert_measurable(records[name])
                 samples = [float(s) for s in run(
                     [str(binaries[name]), 'bench', str(n), str(args.samples)],
                     timeout=180).splitlines()]
@@ -401,6 +521,11 @@ def main():
                 }
                 print(f'{name:12} n={n:8} median={statistics.median(samples):12.3f} ns',
                       flush=True)
+
+        for name, record in records.items():
+            record['lifecycle'] = LIFECYCLE_MEASURED
+            entries[name]['lifecycle'] = LIFECYCLE_MEASURED
+            append_diagnostic(record, 'measured', {'sizes': list(SIZES)})
 
         output = early_output if early_output is not None else default_bench_output(run_id)
         refuse_overwrite(output)
