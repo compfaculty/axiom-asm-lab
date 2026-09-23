@@ -16,7 +16,8 @@
 `python3 lab.py doctor` checks supported host.
 `python3 lab.py verify` compiles and verifies built-ins (oracle + centered guard/RO/ABI probe).
 `python3 lab.py fault-matrix` runs child-process fault fixtures and classifies outcomes.
-`python3 lab.py compare --baseline clang_o3 --candidate unrolled4 --session results/.../bench.json` analyzes one session; pass `--session` twice for a speed claim.
+`python3 lab.py propose-mock --output proposals/out.json` emits a deterministic offline proposal.
+`python3 lab.py evaluate-proposal --mock` imports, builds, verifies, and measures one offline proposal.
 
 New gates must be exposed through documented commands as they are implemented; do not document a future command as currently working.
 

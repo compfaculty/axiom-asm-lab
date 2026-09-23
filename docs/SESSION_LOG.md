@@ -60,3 +60,10 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - Evidence: `evidence/T007.md`. Status: T007 `done`. M003 complete; milestone → M004.
 - Next task: T008 — offline proposal pipeline.
 - Next command: proposal schema validation, mock proposer, immutable importer.
+
+## 2026-09-24 — T008 offline proposal pipeline
+- Change: `proposals.py` schema/source review/mock/import; `lab.py propose-mock` + `evaluate-proposal`.
+- Commands/results: unittest 53 OK; evaluate-proposal --mock exit 0 (build/verify/measure).
+- Evidence: `evidence/T008.md`. Status: T008 `done`.
+- Next task: T009 — bounded search and resume.
+- Next command: proposal/time/stagnation budgets with resumable state.

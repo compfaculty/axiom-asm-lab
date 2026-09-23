@@ -480,6 +480,17 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('doctor')
     sub.add_parser('fault-matrix')
+    mock_p = sub.add_parser('propose-mock')
+    mock_p.add_argument('--candidate-id', default='mock_scalar_copy')
+    mock_p.add_argument('--output', type=Path, default=None)
+    ev = sub.add_parser('evaluate-proposal')
+    ev.add_argument('--proposal', type=Path, default=None,
+                    help='JSON proposal path (omit with --mock)')
+    ev.add_argument('--mock', action='store_true', help='Use deterministic mock proposer')
+    ev.add_argument('--candidate-id', default='mock_scalar_copy')
+    ev.add_argument('--samples', type=int, default=3)
+    ev.add_argument('--seed', type=int, default=DEFAULT_BENCH_SEED)
+    ev.add_argument('--output', type=Path, default=None)
     cmp_cmd = sub.add_parser('compare')
     cmp_cmd.add_argument('--baseline', default='clang_o3')
     cmp_cmd.add_argument('--candidate', required=True)
@@ -507,6 +518,138 @@ def main():
         doctor()
         if args.command == 'doctor':
             print(platform.platform(), clang_identity())
+            return
+        if args.command == 'propose-mock':
+            from proposals import mock_propose
+            proposal = mock_propose(ROOT, candidate_id=args.candidate_id)
+            text = json.dumps(proposal, indent=2) + '\n'
+            if args.output:
+                refuse_overwrite(args.output.resolve())
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(text)
+                print('Saved ' + str(args.output.resolve()))
+            else:
+                sys.stdout.write(text)
+            return
+        if args.command == 'evaluate-proposal':
+            from proposals import import_proposal, mock_propose, validate_proposal
+            from sampling import (
+                DEFAULT_MEMORY_CAP_BYTES,
+                MAX_CALIBRATE_ITERS,
+                cache_mode_label,
+                filter_sizes_for_cap,
+                host_notes,
+                paired_schedule,
+            )
+            if args.mock == bool(args.proposal):
+                parser.error('evaluate-proposal requires exactly one of --mock or --proposal')
+            if not 3 <= args.samples <= 100:
+                parser.error('--samples must be between 3 and 100')
+            early_output = args.output.resolve() if args.output else None
+            if early_output is not None:
+                refuse_overwrite(early_output)
+            run_id, run_dir = new_run_dir()
+            if args.mock:
+                proposal = mock_propose(ROOT, candidate_id=args.candidate_id)
+            else:
+                proposal = json.loads(args.proposal.read_text())
+                validate_proposal(proposal, ROOT)
+            imported = import_proposal(proposal, run_dir, ROOT)
+            print('Imported ' + imported['candidate_id'] + ' -> ' + imported['dir'], flush=True)
+            name = imported['candidate_id']
+            source = Path(imported['source_path'])
+            binary, record = compile_one(name, source, run_dir)
+            try:
+                verify_binary(binary, record, run_dir=run_dir)
+                oracle_result = oracle_check(binary, run_dir)
+                finalize_verified(record, oracle_result)
+            except (RuntimeError, subprocess.CalledProcessError):
+                if record.get('lifecycle') != LIFECYCLE_FAILED:
+                    mark_failed(record, 'proposal_verify_failed', run_dir=run_dir)
+                raise
+            disasm = capture_disassembly(binary, run_dir, name)
+            record['disassembly'] = str(disasm.resolve())
+            print(name + ': PASS', flush=True)
+            # Short calibrated measure for pipeline proof (not a promotion session).
+            from sampling import TARGET_SAMPLE_NS as _TSN
+            target_ns = min(5_000_000, _TSN)
+            measure_sizes = filter_sizes_for_cap((0, 1, 16, 1024), DEFAULT_MEMORY_CAP_BYTES)
+            entries = {
+                name: {
+                    'lifecycle': record['lifecycle'],
+                    'source_sha256': record['source_sha256'],
+                    'proposal': imported,
+                    'disassembly': record.get('disassembly'),
+                    'verification': record['verification'],
+                    'oracle': record['oracle'],
+                    'calibration': {},
+                    'sizes': {},
+                }
+            }
+            for n in measure_sizes:
+                assert_measurable(record)
+                cal = calibrate_iterations(binary, n, target_ns, MAX_CALIBRATE_ITERS)
+                entries[name]['calibration'][str(n)] = cal
+            schedule = paired_schedule([name], measure_sizes, args.samples, args.seed)
+            raw_samples = []
+            buckets = {(name, n): [] for n in measure_sizes}
+            for step in schedule:
+                n = step['size']
+                assert_measurable(record)
+                iters = entries[name]['calibration'][str(n)]['iterations']
+                sample = run_bench_raw_one(binary, n, iters)
+                sample_rec = {
+                    'size': n,
+                    'sample_index': step['sample_index'],
+                    'variant': name,
+                    'iterations': sample['iterations'],
+                    'elapsed_ns': sample['elapsed_ns'],
+                    'ns_per_call': sample['ns_per_call'],
+                    'cache_mode': cache_mode_label(n),
+                }
+                raw_samples.append(sample_rec)
+                buckets[(name, n)].append(sample_rec)
+            for n in measure_sizes:
+                rows = buckets[(name, n)]
+                ns_list = [r['ns_per_call'] for r in rows]
+                entries[name]['sizes'][str(n)] = {
+                    'cache_mode': cache_mode_label(n),
+                    'raw_samples': rows,
+                    'ns_per_call': ns_list,
+                    'median_ns': statistics.median(ns_list),
+                }
+            record['lifecycle'] = LIFECYCLE_MEASURED
+            entries[name]['lifecycle'] = LIFECYCLE_MEASURED
+            output = early_output if early_output else default_bench_output(run_id)
+            refuse_overwrite(output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            samples_path = output.parent / 'samples.jsonl'
+            refuse_overwrite(samples_path)
+            with samples_path.open('w') as fh:
+                for row in raw_samples:
+                    fh.write(json.dumps(row) + '\n')
+            report = {
+                'schema': 2,
+                'run_id': run_id,
+                'command': 'evaluate-proposal',
+                'proposal_import': imported,
+                'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+                'host': platform.platform(),
+                'machine': platform.machine(),
+                'clang': clang_identity(),
+                'samples_per_size': args.samples,
+                'seed': args.seed,
+                'samples_jsonl': str(samples_path.resolve()),
+                'host_notes': host_notes('evaluate-proposal'),
+                'variants': entries,
+            }
+            output.write_text(json.dumps(report, indent=2) + '\n')
+            write_manifest(run_dir, run_id, 'evaluate-proposal', {name: record}, {
+                'bench_output': str(output.resolve()),
+                'proposal_dir': imported['dir'],
+            })
+            print('Saved ' + str(output))
+            print('Run ' + run_id + ' -> ' + str(run_dir / 'manifest.json'))
             return
         if args.command == 'compare':
             from analysis import (
