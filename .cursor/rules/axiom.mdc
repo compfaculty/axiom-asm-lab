@@ -1,0 +1,8 @@
+---
+description: Axiom implementation workflow, correctness gates, and persistent project context
+alwaysApply: true
+---
+Read and follow AGENTS.md at the project root.
+At session start read START_HERE.md and project/status.json; use docs/IMPLEMENTATION_PLAN.md for task selection.
+Before declaring completion apply docs/ACCEPTANCE.md and record evidence under evidence/.
+Native macOS arm64 tests that were not executed remain blocked. Do not invent benchmark results.

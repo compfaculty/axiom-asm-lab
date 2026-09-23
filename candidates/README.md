@@ -1,0 +1,1 @@
+Place reviewed candidate assembly files here. Each `.s` file must export `_sum_array` with signature `uint64_t sum_array(const uint64_t *a, size_t n)`, preserve the macOS arm64 ABI, read only `a[0..n)`, and return a wrapping unsigned sum. Do not write output into this directory automatically from untrusted model responses.

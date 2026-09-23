@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "current_milestone": "M001",
+  "tasks": [
+    {
+      "id": "T001",
+      "milestone": "M001",
+      "depends_on": [],
+      "state": "done",
+      "evidence": "evidence/T001.md",
+      "blocker": null
+    },
+    {
+      "id": "T002",
+      "milestone": "M001",
+      "depends_on": [
+        "T001"
+      ],
+      "state": "pending",
+      "evidence": null,
+      "blocker": null
+    },
+    {
+      "id": "T003",
+      "milestone": "M002",
+      "depends_on": [
+        "T002"
+      ],
+      "state": "pending",
+      "evidence": null,
+      "blocker": null
+    },
+    {
+      "id": "T004",
+      "milestone": "M002",
+      "depends_on": [
+        "T003"
+      ],
+      "state": "pending",
+      "evidence": null,
+      "blocker": null
+    },
+    {
+      "id": "T005",
+      "milestone": "M002",
+      "depends_on": [
+        "T004"
+      ],
+      "state": "pending",
+      "evidence": null,
+      "blocker": null
+    },
+    {
+      "id": "T006",
+      "milestone": "M003",
+      "depends_on": [
+        "T005"
+      ],
+      "state": "pending",
+      "evidence": null,
+      "blocker": null
+    },
+    {
+      "id": "T007",
+      "milestone": "M003",
+      "depends_on": [
+        "T006"
+      ],
+      "state": "pending",
+      "evidence": null,
+      "blocker": null
+    },
+    {
+      "id": "T008",
+      "milestone": "M004",
+      "depends_on": [
+        "T007"
+      ],
+      "state": "pending",
+      "evidence": null,
+      "blocker": null
+    },
+    {
+      "id": "T009",
+      "milestone": "M004",
+      "depends_on": [
+        "T008"
+      ],
+      "state": "pending",
+      "evidence": null,
+      "blocker": null
+    },
+    {
+      "id": "T010",
+      "milestone": "M005",
+      "depends_on": [
+        "T009"
+      ],
+      "state": "pending",
+      "evidence": null,
+      "blocker": null
+    },
+    {
+      "id": "T011",
+      "milestone": "M006",
+      "depends_on": [
+        "T010"
+      ],
+      "state": "pending",
+      "evidence": null,
+      "blocker": null
+    },
+    {
+      "id": "T012",
+      "milestone": "M006",
+      "depends_on": [
+        "T011"
+      ],
+      "state": "pending",
+      "evidence": null,
+      "blocker": null
+    }
+  ]
+}
