@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "current_milestone": "M004",
+  "current_milestone": "M005",
   "tasks": [
     {
       "id": "T001",
@@ -76,7 +76,7 @@
       "depends_on": [
         "T007"
       ],
-      "state": "in_progress",
+      "state": "done",
       "evidence": "evidence/T008.md",
       "blocker": null
     },
@@ -86,7 +86,7 @@
       "depends_on": [
         "T008"
       ],
-      "state": "in_progress",
+      "state": "done",
       "evidence": "evidence/T009.md",
       "blocker": null
     },
@@ -96,9 +96,9 @@
       "depends_on": [
         "T009"
       ],
-      "state": "blocked",
+      "state": "pending",
       "evidence": "evidence/T010.md",
-      "blocker": "Depends on completed T009 optimization loop (ranking/confirmation)."
+      "blocker": null
     },
     {
       "id": "T011",

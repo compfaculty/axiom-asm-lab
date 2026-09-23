@@ -25,10 +25,13 @@ python3 lab.py bench --samples 30
 Inspect the search attempt: it must have measured verification evidence, not a dry import. Use a new search directory when repeating. Run a second benchmark independently and compare those output paths. Supplying one session twice must never produce a speed claim.
 
 ## Remaining work
-- Actual paired baseline evaluation and accepted-candidate selection in bounded search.
-- Stronger interrupted-stage recovery and artifact-aware resume.
-- Native tests for ABI SIMD callee-saved state and broader boundary lengths.
 - Per-kernel candidate dispatch, actual machine measurements, and reproducible published evidence for T010.
+- Native tests for ABI SIMD callee-saved state and broader boundary lengths (partially covered by NEON catalog oracle verify).
 - Revalidate language milestone prerequisites and update stale bootstrap descriptions.
+- Online provider adapters (explicitly deferred).
 
-Portable validation in this change: 94 tests discovered, 90 passed, 4 native tests skipped on Linux without Clang. Native results are not claimed.
+## Closed in optimization-loop follow-up (2026-09-24)
+- Shared protocol evaluate pipeline (`evaluate.py`); search ranks via paired baseline scoring; confirmation uses existing promotion gates; active-eval time budgets; catalog provider with real asm variants; smoke path cannot promote.
+- Native catalog-full search: five candidates ranked; none accepted; best observed `catalog_unrolled8` (score ≈0.92 vs clang_o3). See `evidence/T009.md`.
+
+Portable + native validation for the loop: 109 tests OK; verify and fault-matrix revalidated; protocol search measured on macOS arm64.

@@ -105,3 +105,12 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - T004 onward reopened as blocked pending prerequisite revalidation; historical evidence retained as history.
 - Next command on macOS arm64: python3 -m unittest discover -s tests -v
 - Remaining acceptance work: docs/VERIFICATION_REVIEW.md.
+
+## 2026-09-24 — sum_u64 optimization loop (T008/T009 complete)
+- Host: macOS 26.6.2 arm64, Python 3.14.7, Apple clang 21.0.0. Git `f8abcc9`.
+- Changes: `evaluate.py` shared protocol/smoke pipeline; search ranking + confirmation + active-eval time budgets + resume identity; `OfflineCatalogProvider` with scalar/unrolled2/4/8/NEON; synthetic decision tests; `--smoke` non-promotional search.
+- Baseline revalidation: check_project 0; 109 unittest OK; verify 0; fault-matrix 0/7. Evidence: `evidence/BASELINE_REVALIDATE.md`.
+- Native search: smoke-e2e (2 measured, accepted=null); catalog-full (5 ranked, best=catalog_unrolled8 score≈0.92, accepted=null). No speed claim.
+- Evidence: `evidence/T008.md`, `evidence/T009.md`. Status: T008/T009 done; milestone → M005; T010 pending.
+- Next task: T010 — expand kernels and machine experiments.
+- Next command: `python3 lab.py portfolio` (after reading T010 acceptance in docs/IMPLEMENTATION_PLAN.md).
