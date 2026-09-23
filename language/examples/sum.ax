@@ -1,0 +1,5 @@
+# Sum example (wrapping)
+fn sum_demo() -> u64
+let a = array_u64(1, 2, 0xffffffffffffffff)
+let s = reduce_sum_u64_wrap(a)
+return s

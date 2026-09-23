@@ -17,6 +17,8 @@
 `python3 lab.py verify` compiles and verifies built-ins (oracle + centered guard/RO/ABI probe).
 `python3 lab.py fault-matrix` runs child-process fault fixtures and classifies outcomes.
 `python3 -m unittest tests.test_language_ir -v` checks IR typechecking and interpreter-vs-oracle equivalence.
+`python3 -m unittest tests.test_language_compile -v` checks parser rejections and native template equivalence.
+`python3 lab.py lang-check` compiles example sources and diffs native vs interpreter.
 
 New gates must be exposed through documented commands as they are implemented; do not document a future command as currently working.
 

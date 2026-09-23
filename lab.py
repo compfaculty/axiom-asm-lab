@@ -495,6 +495,10 @@ def main():
     port = sub.add_parser('portfolio')
     port.add_argument('--seed', type=int, default=1)
     port.add_argument('--output', type=Path, default=None)
+    lang = sub.add_parser('lang-check')
+    lang.add_argument('--source', type=Path, action='append', default=None,
+                      help='.ax source path (default: language/examples/*.ax)')
+    lang.add_argument('--output', type=Path, default=None)
     ev = sub.add_parser('evaluate-proposal')
     ev.add_argument('--proposal', type=Path, default=None,
                     help='JSON proposal path (omit with --mock)')
@@ -593,6 +597,37 @@ def main():
             if not ok:
                 raise RuntimeError('portfolio checks failed')
             print('portfolio: PASS kernels=' + ','.join(payload['kernel_ids']), flush=True)
+            return
+        if args.command == 'lang-check':
+            from language.native import check_source_equiv
+            sources = args.source
+            if not sources:
+                sources = sorted((ROOT / 'language' / 'examples').glob('*.ax'))
+            results = []
+            for path in sources:
+                path = Path(path)
+                result = check_source_equiv(path.read_text())
+                result['source'] = str(path.resolve())
+                results.append(result)
+            payload = {
+                'schema': 1,
+                'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+                'host': platform.platform(),
+                'machine': platform.machine(),
+                'results': results,
+                'all_ok': all(r['ok'] for r in results),
+            }
+            text = json.dumps(payload, indent=2) + '\n'
+            if args.output:
+                refuse_overwrite(args.output.resolve())
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(text)
+                print('Saved ' + str(args.output.resolve()))
+            else:
+                sys.stdout.write(text)
+            if not payload['all_ok']:
+                raise RuntimeError('lang-check failed')
+            print('lang-check: PASS n=' + str(len(results)), flush=True)
             return
         if args.command == 'evaluate-proposal':
             from proposals import import_proposal, mock_propose, validate_proposal

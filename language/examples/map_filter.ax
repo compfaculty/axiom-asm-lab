@@ -1,0 +1,5 @@
+# Stable map/filter even >> 1
+fn map_filter_demo() -> arr_u64
+let a = array_u64(2, 3, 4)
+let b = map_filter_even_shr1_u64(a)
+return b

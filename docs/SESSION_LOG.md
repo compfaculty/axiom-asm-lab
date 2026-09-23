@@ -88,3 +88,10 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - Evidence: `evidence/T011.md`. Status: T011 `done`.
 - Next task: T012 — minimal source and native lowering.
 - Next command: parser/typecheck + lower sum/map/search to tested templates.
+
+## 2026-09-24 — T012 minimal source and native lowering (M006 complete)
+- Change: parser/typecheck (`.ax`), template lowering for sum/find/map_filter, native ctypes runner vs interpreter oracle, SUBSET.md, `lab.py lang-check`, disasm under `evidence/disasm/T012_*.txt`.
+- Commands/results: unittest 82 OK; lang-check PASS n=3; otool disasm of compiled templates.
+- Evidence: `evidence/T012.md`. Status: T012 `done`. Milestone M006 complete.
+- Next: deferred work in IMPLEMENTATION_PLAN (no further tasks in packet).
+- Next command: review `docs/LANGUAGE_ROADMAP.md` Stage 4+ or open ADR for next milestone.

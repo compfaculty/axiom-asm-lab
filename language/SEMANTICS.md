@@ -1,7 +1,8 @@
 # Semantic IR (T011)
 
 Exact semantics are defined before surface syntax. The interpreter in
-`language/interpreter.py` is the reference oracle for later lowering (T012).
+`language/interpreter.py` is the reference oracle for lowering (T012).
+Surface syntax and the supported native subset are in `language/SUBSET.md`.
 
 ## Types
 | Type | Meaning |

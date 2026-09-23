@@ -1,0 +1,6 @@
+# Find first byte
+fn find_demo() -> index
+let a = array_u8(9, 7, 7)
+let n = const_u8(7)
+let i = find_u8(a, n)
+return i
