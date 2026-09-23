@@ -235,6 +235,8 @@ def validate_report(report, baseline, candidate, expected_sizes):
     """Fail closed before statistical analysis; legacy summaries are not evidence."""
     if not report.get('run_id') or report.get('schema') != 2:
         raise ValueError('Missing run identity or unsupported report schema')
+    if report.get('promotional') is False:
+        raise ValueError('Non-promotional smoke report cannot be used for ranking or promotion')
     for key in ('host', 'machine', 'clang'):
         if not report.get(key):
             raise ValueError('Missing report identity: ' + key)
