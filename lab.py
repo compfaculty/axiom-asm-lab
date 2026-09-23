@@ -610,11 +610,11 @@ def main():
             return
         if args.command == 'lang-check':
             from language.native import check_source_equiv
-            sources = args.source
-            if not sources:
-                sources = sorted((ROOT / 'language' / 'examples').glob('*.ax'))
+            source_paths = args.source
+            if not source_paths:
+                source_paths = sorted((ROOT / 'language' / 'examples').glob('*.ax'))
             results = []
-            for path in sources:
+            for path in source_paths:
                 path = Path(path)
                 result = check_source_equiv(path.read_text())
                 result['source'] = str(path.resolve())
