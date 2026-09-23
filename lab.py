@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 HARNESS = ROOT / 'src' / 'harness.c'
 SIZES = (0, 1, 3, 4, 7, 16, 64, 1024, 65536, 1048576)
+ORACLE_SEED = 1
 BUILTIN_SOURCES = {
     'clang_o3': ROOT / 'src' / 'reference.c',
     'scalar': ROOT / 'asm' / 'scalar.s',
@@ -128,6 +129,34 @@ def verify_binary(binary, record):
     return output
 
 
+def oracle_check(binary, run_dir, seed=ORACLE_SEED):
+    """Differential check: native sum-file results must match independent Python oracle."""
+    from kernels.sum_u64 import case_fingerprint, generate_cases, oracle, write_sum_file
+    cases = generate_cases(seed)
+    case_dir = run_dir / 'oracle_cases'
+    case_dir.mkdir(exist_ok=True)
+    mismatches = []
+    for label, values in cases:
+        path = case_dir / (label + '.txt')
+        write_sum_file(path, values)
+        got = int(run([str(binary), 'sum-file', str(path)], timeout=60))
+        want = oracle(values)
+        if got != want:
+            mismatches.append({'label': label, 'n': len(values), 'got': got, 'want': want})
+            break
+    result = {
+        'seed': seed,
+        'case_count': len(cases),
+        'fingerprint': case_fingerprint(cases),
+        'mismatches': mismatches,
+        'state': 'pass' if not mismatches else 'failed',
+    }
+    if mismatches:
+        raise RuntimeError('Oracle mismatch for ' + mismatches[0]['label']
+                           + f": got={mismatches[0]['got']} want={mismatches[0]['want']}")
+    return result
+
+
 def ensure_fresh(record):
     """Invalidate verification if source or harness changed since build/verify."""
     src = Path(record['source_path'])
@@ -205,6 +234,7 @@ def main():
         for name, source in sources(args.candidate).items():
             binary, record = compile_one(name, source, run_dir)
             verify_binary(binary, record)
+            record['oracle'] = oracle_check(binary, run_dir)
             print(name + ': PASS', flush=True)
             records[name] = record
             binaries[name] = binary
@@ -225,6 +255,7 @@ def main():
                 'build_argv': record['build_argv'],
                 'compiler_identity': record['compiler_identity'],
                 'verification': record['verification'],
+                'oracle': record['oracle'],
                 'sizes': {},
             }
 

@@ -64,8 +64,33 @@ static int bench(size_t n, size_t samples) {
     free(a);
     return 0;
 }
+static int sum_file(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) { perror("fopen"); return 2; }
+    unsigned long long n_ull = 0;
+    if (fscanf(f, "%llu", &n_ull) != 1) { fclose(f); return 2; }
+    if (n_ull > 16777216ull) { fclose(f); return 2; }
+    size_t n = (size_t)n_ull;
+    if (n == 0) {
+        fclose(f);
+        printf("%" PRIu64 "\n", sum_array(NULL, 0));
+        return 0;
+    }
+    uint64_t *a = malloc(n * sizeof(*a));
+    if (!a) { fclose(f); return 2; }
+    for (size_t i = 0; i < n; ++i) {
+        unsigned long long v = 0;
+        if (fscanf(f, "%llu", &v) != 1) { free(a); fclose(f); return 2; }
+        a[i] = (uint64_t)v;
+    }
+    fclose(f);
+    printf("%" PRIu64 "\n", sum_array(a, n));
+    free(a);
+    return 0;
+}
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "verify")) return verify();
+    if (argc == 3 && !strcmp(argv[1], "sum-file")) return sum_file(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "bench")) {
         char *end1, *end2;
         unsigned long long n = strtoull(argv[2], &end1, 10);
@@ -73,6 +98,6 @@ int main(int argc, char **argv) {
         if (*end1 || *end2) return 2;
         return bench((size_t)n, (size_t)samples);
     }
-    fprintf(stderr, "usage: harness verify | bench N SAMPLES\n");
+    fprintf(stderr, "usage: harness verify | sum-file PATH | bench N SAMPLES\n");
     return 2;
 }

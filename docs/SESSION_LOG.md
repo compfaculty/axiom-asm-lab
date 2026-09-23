@@ -25,3 +25,10 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - Evidence: `evidence/T002.md`. Status: T002 `done`. M001 tasks complete.
 - Next task: T003 — Define contract-driven test generation.
 - Next command: extract kernel metadata and independent wrapping oracle; add seeded distributions and boundary lengths (`docs/IMPLEMENTATION_PLAN.md` T003).
+
+## 2026-09-24 — T003 contract-driven oracle
+- Change: `kernels/sum_u64.py` contract + wrapping oracle + seeded boundary/distribution cases; harness `sum-file`; `lab.py` `oracle_check`; `candidates/wrong_sum.s`; `tests/test_sum_oracle.py`.
+- Commands/results: unittest 20 OK; `lab.py verify` 0 (builtins + 115 oracle cases); `lab.py verify --candidate wrong_sum` 1 (FAIL empty).
+- Evidence: `evidence/T003.md`. Status: T003 `done`.
+- Next task: T004 — native memory and ABI checks.
+- Next command: implement guarded mappings, read-only inputs, ABI sentinel wrapper, child-process fault classification.
