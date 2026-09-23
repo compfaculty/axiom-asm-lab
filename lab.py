@@ -6,6 +6,7 @@ import json
 import platform
 import re
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -15,12 +16,23 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 HARNESS = ROOT / 'src' / 'harness.c'
+ABI_WRAP = ROOT / 'src' / 'abi_wrap.s'
 SIZES = (0, 1, 3, 4, 7, 16, 64, 1024, 65536, 1048576)
 ORACLE_SEED = 1
 BUILTIN_SOURCES = {
     'clang_o3': ROOT / 'src' / 'reference.c',
     'scalar': ROOT / 'asm' / 'scalar.s',
     'unrolled4': ROOT / 'asm' / 'unrolled4.s',
+}
+# Fixture name -> (expected classification, harness probe command)
+FAULT_MATRIX = {
+    'scalar': ('pass', 'probe'),
+    'overread': ('memory_fault', 'probe-tight'),
+    'underread': ('memory_fault', 'probe-head'),
+    'input_write': ('memory_fault', 'probe'),
+    'abi_corrupt': ('abi_fail', 'probe'),
+    'trap': ('trap', 'probe'),
+    'infinite_loop': ('timed_out', 'probe'),
 }
 NAME_RE = re.compile(r'^[A-Za-z0-9_-]+$')
 
@@ -89,12 +101,14 @@ def refuse_overwrite(path):
 def compile_one(name, source, run_dir):
     if not HARNESS.is_file():
         raise FileNotFoundError(HARNESS)
+    if not ABI_WRAP.is_file():
+        raise FileNotFoundError(ABI_WRAP)
     if not Path(source).is_file():
         raise FileNotFoundError(source)
     binary = run_dir / ('harness_' + name)
     refuse_overwrite(binary)
     argv = ['clang', '-O3', '-std=c11', '-Wall', '-Wextra',
-            str(HARNESS), str(source), '-o', str(binary)]
+            str(HARNESS), str(ABI_WRAP), str(source), '-o', str(binary)]
     run(argv)
     record = {
         'name': name,
@@ -203,10 +217,102 @@ def write_manifest(run_dir, run_id, command, records, extra=None):
     return path
 
 
+def fixture_source(name):
+    if name == 'scalar':
+        return BUILTIN_SOURCES['scalar']
+    path = ROOT / 'fixtures' / (name + '.s')
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return path
+
+
+def classify_child(returncode, stdout, stderr, timed_out=False):
+    if timed_out:
+        return 'timed_out'
+    out = (stdout or '') + '\n' + (stderr or '')
+    if returncode == 0 and 'PASS' in (stdout or ''):
+        return 'pass'
+    if returncode == 3 or 'ABI_FAIL' in out:
+        return 'abi_fail'
+    if returncode == 1 or 'FAIL' in out:
+        return 'verification_failed'
+    if returncode < 0:
+        sig = -returncode
+        if sig in (signal.SIGSEGV, signal.SIGBUS):
+            return 'memory_fault'
+        if sig in (signal.SIGILL, signal.SIGTRAP):
+            return 'trap'
+        return 'signal_' + str(sig)
+    # macOS sometimes reports positive status with signal encoding; treat high bits.
+    if returncode > 128:
+        sig = returncode - 128
+        if sig in (signal.SIGSEGV, signal.SIGBUS):
+            return 'memory_fault'
+        if sig in (signal.SIGILL, signal.SIGTRAP):
+            return 'trap'
+    return 'failed'
+
+
+def run_child(args, timeout):
+    try:
+        proc = subprocess.run(args, cwd=ROOT, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=timeout)
+        return {
+            'returncode': proc.returncode,
+            'stdout': proc.stdout,
+            'stderr': proc.stderr,
+            'timed_out': False,
+            'classification': classify_child(proc.returncode, proc.stdout, proc.stderr, False),
+        }
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or '')
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or '')
+        return {
+            'returncode': None,
+            'stdout': stdout,
+            'stderr': stderr,
+            'timed_out': True,
+            'classification': 'timed_out',
+        }
+
+
+def fault_matrix(run_dir=None):
+    """Compile fixtures + control scalar; run probe in child processes; classify outcomes."""
+    if run_dir is None:
+        _, run_dir = new_run_dir()
+    results = {}
+    mismatches = []
+    for name, (expected, probe_cmd) in FAULT_MATRIX.items():
+        source = fixture_source(name)
+        binary, record = compile_one(name, source, run_dir)
+        timeout = 1.0 if name == 'infinite_loop' else 30.0
+        child = run_child([str(binary), probe_cmd], timeout=timeout)
+        ok = child['classification'] == expected
+        results[name] = {
+            'expected': expected,
+            'observed': child['classification'],
+            'probe_cmd': probe_cmd,
+            'ok': ok,
+            'returncode': child['returncode'],
+            'timed_out': child['timed_out'],
+            'stderr_tail': (child['stderr'] or '')[-400:],
+            'source_sha256': record['source_sha256'],
+            'binary_sha256': record['binary_sha256'],
+        }
+        status = 'OK' if ok else 'MISMATCH'
+        print(f'{name:14} expected={expected:18} observed={child["classification"]:18} {status}',
+              flush=True)
+        if not ok:
+            mismatches.append(name)
+    return {'results': results, 'mismatches': mismatches, 'run_dir': str(run_dir)}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('doctor')
+    sub.add_parser('fault-matrix')
     for action in ('verify', 'bench'):
         cmd = sub.add_parser(action)
         cmd.add_argument('--candidate', help='Filename stem in candidates/')
@@ -220,6 +326,28 @@ def main():
         if args.command == 'doctor':
             print(platform.platform(), clang_identity())
             return
+        if args.command == 'fault-matrix':
+            run_id, run_dir = new_run_dir()
+            report = fault_matrix(run_dir)
+            out = run_dir / 'fault_matrix.json'
+            refuse_overwrite(out)
+            payload = {
+                'schema': 1,
+                'run_id': run_id,
+                'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+                'host': platform.platform(),
+                'machine': platform.machine(),
+                'clang': clang_identity(),
+                'matrix': report['results'],
+                'mismatches': report['mismatches'],
+            }
+            out.write_text(json.dumps(payload, indent=2) + '\n')
+            write_manifest(run_dir, run_id, 'fault-matrix', {}, {'fault_matrix': str(out)})
+            print('Saved ' + str(out))
+            if report['mismatches']:
+                raise RuntimeError('Fault matrix mismatches: ' + ', '.join(report['mismatches']))
+            return
+
         if args.command == 'bench' and not 3 <= args.samples <= 100:
             parser.error('--samples must be between 3 and 100')
 

@@ -14,8 +14,9 @@
 `python3 scripts/check_project.py` checks the project packet and completion bookkeeping.
 `python3 -m unittest discover -s tests -v` runs portable tests.
 `python3 lab.py doctor` checks supported host.
-`python3 lab.py verify` compiles and verifies built-ins.
-`python3 lab.py bench --samples 15 --output results/run.json` runs the bootstrap measurement.
+`python3 lab.py verify` compiles and verifies built-ins (oracle + centered guard/RO/ABI probe).
+`python3 lab.py fault-matrix` runs child-process fault fixtures and classifies outcomes.
+`python3 lab.py bench --samples 15` runs the bootstrap measurement into a unique results path.
 
 New gates must be exposed through documented commands as they are implemented; do not document a future command as currently working.
 

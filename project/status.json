@@ -36,8 +36,8 @@
       "depends_on": [
         "T003"
       ],
-      "state": "pending",
-      "evidence": null,
+      "state": "done",
+      "evidence": "evidence/T004.md",
       "blocker": null
     },
     {

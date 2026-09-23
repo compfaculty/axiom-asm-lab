@@ -32,3 +32,10 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - Evidence: `evidence/T003.md`. Status: T003 `done`.
 - Next task: T004 — native memory and ABI checks.
 - Next command: implement guarded mappings, read-only inputs, ABI sentinel wrapper, child-process fault classification.
+
+## 2026-09-24 — T004 memory/ABI fault matrix
+- Change: guarded RO mmap probe modes, `src/abi_wrap.s` ABI sentinels, `lab.py fault-matrix` child classification, fixtures (overread/underread/input_write/abi_corrupt/trap/infinite_loop).
+- Commands/results: unittest 27 OK; `lab.py verify` 0; `lab.py fault-matrix` 0 (7/7 expected classifications).
+- Evidence: `evidence/T004.md`. Status: T004 `done`.
+- Next task: T005 — enforce verification before timing.
+- Next command: implement lifecycle states and prevent measurement after failed/stale checks.
