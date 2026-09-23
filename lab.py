@@ -492,6 +492,9 @@ def main():
     search_cmd.add_argument('--max-stagnation', type=int, default=5)
     search_cmd.add_argument('--provider', default='offline',
                             help='offline (default) or online (requires config)')
+    port = sub.add_parser('portfolio')
+    port.add_argument('--seed', type=int, default=1)
+    port.add_argument('--output', type=Path, default=None)
     ev = sub.add_parser('evaluate-proposal')
     ev.add_argument('--proposal', type=Path, default=None,
                     help='JSON proposal path (omit with --mock)')
@@ -556,6 +559,40 @@ def main():
                 'attempts': len(state.get('attempts') or []),
                 'state': str(ctrl.state_path),
             }, indent=2))
+            return
+        if args.command == 'portfolio':
+            from kernels import (
+                build_experiment_report,
+                list_kernel_ids,
+                portfolio_contracts,
+                run_native_comparisons,
+                run_oracle_selfchecks,
+            )
+            payload = {
+                'schema': 1,
+                'timestamp_utc': datetime.now(timezone.utc).isoformat(),
+                'host': platform.platform(),
+                'machine': platform.machine(),
+                'kernel_ids': list_kernel_ids(),
+                'contracts': portfolio_contracts(),
+                'oracle_selfchecks': run_oracle_selfchecks(seed=args.seed),
+                'native_comparisons': run_native_comparisons(ROOT, seed=args.seed),
+                'experiments': build_experiment_report(),
+                'mandatory_speedup': False,
+            }
+            ok = (payload['oracle_selfchecks']['all_passed']
+                  and payload['native_comparisons']['all_ok'])
+            text = json.dumps(payload, indent=2) + '\n'
+            if args.output:
+                refuse_overwrite(args.output.resolve())
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(text)
+                print('Saved ' + str(args.output.resolve()))
+            else:
+                sys.stdout.write(text)
+            if not ok:
+                raise RuntimeError('portfolio checks failed')
+            print('portfolio: PASS kernels=' + ','.join(payload['kernel_ids']), flush=True)
             return
         if args.command == 'evaluate-proposal':
             from proposals import import_proposal, mock_propose, validate_proposal

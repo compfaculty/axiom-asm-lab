@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-ALLOWED_KERNELS = {'sum_u64'}
+ALLOWED_KERNELS = {'sum_u64', 'find_u8', 'map_filter_u64'}
 ALLOWED_CONTRACT_VERSIONS = {1}
 REQUIRED_FIELDS = (
     'schema_version',

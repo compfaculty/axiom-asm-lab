@@ -74,3 +74,10 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - Evidence: `evidence/T009.md`. Status: T009 `done`. Milestone → M005.
 - Next task: T010 — expand kernels and machine experiments.
 - Next command: add byte search and stable filter/map kernel contracts.
+
+## 2026-09-24 — T010 kernel portfolio (M005 complete)
+- Change: `find_u8` + `map_filter_u64` contracts/oracles; C refs; cache/dependency experiment notes; `lab.py portfolio`.
+- Commands/results: unittest 65 OK; portfolio PASS for three kernels; no mandatory speedup.
+- Evidence: `evidence/T010.md`. Status: T010 `done`. Milestone → M006.
+- Next task: T011 — semantic IR and interpreter.
+- Next command: define typed IR ops/effects and interpreter with invalid-program diagnostics.

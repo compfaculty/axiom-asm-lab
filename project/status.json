@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "current_milestone": "M005",
+  "current_milestone": "M006",
   "tasks": [
     {
       "id": "T001",
@@ -96,8 +96,8 @@
       "depends_on": [
         "T009"
       ],
-      "state": "pending",
-      "evidence": null,
+      "state": "done",
+      "evidence": "evidence/T010.md",
       "blocker": null
     },
     {
