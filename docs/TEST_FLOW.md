@@ -16,7 +16,7 @@
 `python3 lab.py doctor` checks supported host.
 `python3 lab.py verify` compiles and verifies built-ins (oracle + centered guard/RO/ABI probe).
 `python3 lab.py fault-matrix` runs child-process fault fixtures and classifies outcomes.
-`python3 lab.py bench --samples 15` runs the bootstrap measurement into a unique results path.
+`python3 lab.py bench --samples 15 --seed 1` runs calibrated paired sampling into a unique results path.
 
 New gates must be exposed through documented commands as they are implemented; do not document a future command as currently working.
 

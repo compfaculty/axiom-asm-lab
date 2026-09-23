@@ -19,6 +19,7 @@ HARNESS = ROOT / 'src' / 'harness.c'
 ABI_WRAP = ROOT / 'src' / 'abi_wrap.s'
 SIZES = (0, 1, 3, 4, 7, 16, 64, 1024, 65536, 1048576)
 ORACLE_SEED = 1
+DEFAULT_BENCH_SEED = 1
 BUILTIN_SOURCES = {
     'clang_o3': ROOT / 'src' / 'reference.c',
     'scalar': ROOT / 'asm' / 'scalar.s',
@@ -421,7 +422,49 @@ def fault_matrix(run_dir=None):
     return {'results': results, 'mismatches': mismatches, 'run_dir': str(run_dir)}
 
 
+def calibrate_iterations(binary, n, target_ns, max_iters):
+    line = run([str(binary), 'calibrate', str(n), str(target_ns), str(max_iters)],
+               timeout=300)
+    parts = line.split()
+    if len(parts) != 3:
+        raise RuntimeError('Bad calibrate output: ' + line)
+    iterations = int(parts[0])
+    elapsed_ns = int(parts[1])
+    capped = parts[2] == '1'
+    return {
+        'iterations': iterations,
+        'elapsed_ns': elapsed_ns,
+        'target_ns': target_ns,
+        'max_iters': max_iters,
+        'capped': capped,
+        'reached_target': elapsed_ns >= target_ns,
+    }
+
+
+def run_bench_raw_one(binary, n, iterations):
+    """One calibrated sample: returns elapsed_ns, iterations, ns_per_call."""
+    line = run([str(binary), 'bench-raw', str(n), '1', str(iterations)], timeout=300)
+    parts = line.split()
+    if len(parts) != 3:
+        raise RuntimeError('Bad bench-raw output: ' + line)
+    return {
+        'elapsed_ns': int(parts[0]),
+        'iterations': int(parts[1]),
+        'ns_per_call': float(parts[2]),
+    }
+
+
 def main():
+    from sampling import (
+        DEFAULT_MEMORY_CAP_BYTES,
+        MAX_CALIBRATE_ITERS,
+        TARGET_SAMPLE_NS,
+        cache_mode_label,
+        filter_sizes_for_cap,
+        host_notes,
+        paired_schedule,
+    )
+
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('doctor')
@@ -431,6 +474,13 @@ def main():
         cmd.add_argument('--candidate', help='Filename stem in candidates/')
         if action == 'bench':
             cmd.add_argument('--samples', type=int, default=15)
+            cmd.add_argument('--seed', type=int, default=DEFAULT_BENCH_SEED,
+                             help='RNG seed for paired variant order')
+            cmd.add_argument('--target-sample-ms', type=float, default=20.0,
+                             help='Calibration target duration per sample')
+            cmd.add_argument('--memory-cap-bytes', type=int,
+                             default=DEFAULT_MEMORY_CAP_BYTES)
+            cmd.add_argument('--host-notes', default=None)
             cmd.add_argument('--output', type=Path, default=None,
                              help='Bench JSON path (must not already exist)')
     args = parser.parse_args()
@@ -491,6 +541,17 @@ def main():
             print('Run ' + run_id + ' -> ' + str(run_dir / 'manifest.json'))
             return
 
+        target_ns = int(args.target_sample_ms * 1_000_000)
+        if target_ns < 1_000_000:
+            parser.error('--target-sample-ms too small')
+        measure_sizes = filter_sizes_for_cap(SIZES, args.memory_cap_bytes)
+        skipped_sizes = [n for n in SIZES if n not in measure_sizes]
+        if skipped_sizes:
+            print('Skipping sizes over memory cap '
+                  + str(args.memory_cap_bytes) + ': ' + str(skipped_sizes), flush=True)
+        if not measure_sizes:
+            raise RuntimeError('No sizes remain under memory cap')
+
         entries = {}
         for name, record in records.items():
             assert_measurable(record)
@@ -506,49 +567,106 @@ def main():
                 'verification': record['verification'],
                 'oracle': record['oracle'],
                 'diagnostics': record.get('diagnostics'),
+                'calibration': {},
                 'sizes': {},
             }
 
-        for n in SIZES:
+        # Calibrate iterations per (variant, size).
+        for n in measure_sizes:
             for name in entries:
                 assert_measurable(records[name])
-                samples = [float(s) for s in run(
-                    [str(binaries[name]), 'bench', str(n), str(args.samples)],
-                    timeout=180).splitlines()]
+                cal = calibrate_iterations(
+                    binaries[name], n, target_ns, MAX_CALIBRATE_ITERS)
+                entries[name]['calibration'][str(n)] = cal
+                flag = 'CAP' if cal['capped'] and not cal['reached_target'] else 'ok'
+                print(f'calibrate {name:12} n={n:8} iters={cal["iterations"]:<10} '
+                      f'elapsed_ns={cal["elapsed_ns"]:<12} {flag}', flush=True)
+
+        schedule = paired_schedule(
+            list(entries.keys()), measure_sizes, args.samples, args.seed)
+        raw_samples = []
+        # Accumulate per-variant/size lists while respecting paired order.
+        buckets = {(name, n): [] for name in entries for n in measure_sizes}
+        for step in schedule:
+            name = step['variant']
+            n = step['size']
+            assert_measurable(records[name])
+            iters = entries[name]['calibration'][str(n)]['iterations']
+            sample = run_bench_raw_one(binaries[name], n, iters)
+            sample_rec = {
+                'size': n,
+                'sample_index': step['sample_index'],
+                'variant': name,
+                'iterations': sample['iterations'],
+                'elapsed_ns': sample['elapsed_ns'],
+                'ns_per_call': sample['ns_per_call'],
+                'cache_mode': cache_mode_label(n),
+            }
+            raw_samples.append(sample_rec)
+            buckets[(name, n)].append(sample_rec)
+            print(f'{name:12} n={n:8} i={step["sample_index"]:<3} '
+                  f'ns/call={sample["ns_per_call"]:12.3f}', flush=True)
+
+        for name in entries:
+            for n in measure_sizes:
+                rows = buckets[(name, n)]
+                ns_list = [r['ns_per_call'] for r in rows]
                 entries[name]['sizes'][str(n)] = {
-                    'ns_per_call': samples,
-                    'median_ns': statistics.median(samples),
+                    'cache_mode': cache_mode_label(n),
+                    'array_bytes': n * 8,
+                    'calibration': entries[name]['calibration'][str(n)],
+                    'raw_samples': rows,
+                    'ns_per_call': ns_list,
+                    'median_ns': statistics.median(ns_list),
                 }
-                print(f'{name:12} n={n:8} median={statistics.median(samples):12.3f} ns',
-                      flush=True)
 
         for name, record in records.items():
             record['lifecycle'] = LIFECYCLE_MEASURED
             entries[name]['lifecycle'] = LIFECYCLE_MEASURED
-            append_diagnostic(record, 'measured', {'sizes': list(SIZES)})
+            append_diagnostic(record, 'measured', {
+                'sizes': measure_sizes,
+                'seed': args.seed,
+                'samples_per_size': args.samples,
+            })
 
         output = early_output if early_output is not None else default_bench_output(run_id)
         refuse_overwrite(output)
         output.parent.mkdir(parents=True, exist_ok=True)
+        samples_path = output.parent / 'samples.jsonl'
+        refuse_overwrite(samples_path)
+        with samples_path.open('w') as fh:
+            for row in raw_samples:
+                fh.write(json.dumps(row) + '\n')
         report = {
-            'schema': 1,
+            'schema': 2,
             'run_id': run_id,
             'timestamp_utc': datetime.now(timezone.utc).isoformat(),
             'host': platform.platform(),
             'machine': platform.machine(),
             'clang': clang_identity(),
             'samples_per_size': args.samples,
+            'seed': args.seed,
+            'target_sample_ns': target_ns,
+            'memory_cap_bytes': args.memory_cap_bytes,
+            'measure_sizes': measure_sizes,
+            'skipped_sizes': skipped_sizes,
+            'schedule_len': len(schedule),
+            'host_notes': host_notes(args.host_notes),
+            'samples_jsonl': str(samples_path.resolve()),
             'run_dir': str(run_dir.resolve()),
             'variants': entries,
         }
         output.write_text(json.dumps(report, indent=2) + '\n')
         write_manifest(run_dir, run_id, 'bench', records, {
             'bench_output': str(output.resolve()),
+            'samples_jsonl': str(samples_path.resolve()),
             'samples_per_size': args.samples,
+            'seed': args.seed,
         })
         print('Saved ' + str(output))
+        print('Samples ' + str(samples_path))
         print('Run ' + run_id + ' -> ' + str(run_dir / 'manifest.json'))
-    except (RuntimeError, FileNotFoundError, FileExistsError,
+    except (RuntimeError, FileNotFoundError, FileExistsError, MemoryError,
             subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError) as exc:
         print('ERROR: ' + str(exc), file=sys.stderr)
         if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:

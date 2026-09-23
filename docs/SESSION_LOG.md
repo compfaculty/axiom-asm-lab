@@ -46,3 +46,10 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - Evidence: `evidence/T005.md`. Status: T005 `done`. M002 (T003–T005) complete; `current_milestone=M003`.
 - Next task: T006 — reproducible native sampling.
 - Next command: calibrate iterations; randomized paired order with seed; raw samples + memory caps.
+
+## 2026-09-24 — T006 reproducible sampling
+- Change: harness `calibrate`/`bench-raw`; `sampling.py` paired schedules, memory caps, cache-mode labels; `lab.py bench` persists raw samples + host notes (schema 2).
+- Commands/results: unittest 36 OK; verify 0; bench --samples 3 --seed 42 exit 0 with iterations/elapsed_ns in samples.jsonl.
+- Evidence: `evidence/T006.md`. Status: T006 `done`.
+- Next task: T007 — comparison and report (paired bootstrap).
+- Next command: implement seeded paired bootstrap, per-size ratios, aggregate objective, regression ceiling.

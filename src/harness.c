@@ -144,12 +144,56 @@ static uint64_t ns_now(void) {
     if (clock_gettime(CLOCK_MONOTONIC_RAW, &t)) { perror("clock_gettime"); exit(2); }
     return (uint64_t)t.tv_sec * UINT64_C(1000000000) + (uint64_t)t.tv_nsec;
 }
-static int bench(size_t n, size_t samples) {
-    if (n > 16777216 || samples < 1 || samples > 10000) return 2;
+
+static int alloc_bench_buf(size_t n, uint64_t **out) {
     uint64_t *a = malloc((n ? n : 1) * sizeof(*a));
     if (!a) return 2;
     for (size_t i = 0; i < n; ++i) a[i] = next_u64();
     if (check(a, n, "bench")) { free(a); return 1; }
+    *out = a;
+    return 0;
+}
+
+static uint64_t time_iters(uint64_t *a, size_t n, uint64_t iterations, volatile uint64_t *sink) {
+    uint64_t start = ns_now();
+    for (uint64_t j = 0; j < iterations; ++j) *sink ^= sum_array(a, n);
+    return ns_now() - start;
+}
+
+/* calibrate N TARGET_NS MAX_ITERS -> "iterations elapsed_ns capped" */
+static int calibrate(size_t n, uint64_t target_ns, uint64_t max_iters) {
+    if (n > 16777216 || target_ns < 1000 || max_iters < 1) return 2;
+    uint64_t *a = NULL;
+    int rc = alloc_bench_buf(n, &a);
+    if (rc) return rc;
+    volatile uint64_t sink = 0;
+    /* Warmup */
+    (void)time_iters(a, n, 1, &sink);
+    uint64_t iters = 1;
+    uint64_t elapsed = 0;
+    int capped = 0;
+    for (;;) {
+        elapsed = time_iters(a, n, iters, &sink);
+        if (elapsed >= target_ns || iters >= max_iters) {
+            if (elapsed < target_ns && iters >= max_iters) capped = 1;
+            break;
+        }
+        uint64_t next = iters > (max_iters / 2) ? max_iters : iters * 2;
+        if (next == iters) { capped = 1; break; }
+        iters = next;
+    }
+    printf("%" PRIu64 " %" PRIu64 " %d\n", iters, elapsed, capped);
+    if (sink == UINT64_C(0xdeadbeef)) fprintf(stderr, "sink=%" PRIu64 "\n", sink);
+    free(a);
+    return 0;
+}
+
+/* Legacy: bench N SAMPLES (fixed heuristic iterations; ns/call only). */
+static int bench(size_t n, size_t samples) {
+    if (n > 16777216 || samples < 1 || samples > 10000) return 2;
+    uint64_t *a = NULL;
+    int rc = alloc_bench_buf(n, &a);
+    if (rc) return rc;
     volatile uint64_t sink = 0;
     size_t iterations = n <= 64 ? 100000 : n <= 4096 ? 10000 : n <= 1048576 ? 100 : 8;
     for (size_t j = 0; j < iterations; ++j) sink ^= sum_array(a, n);
@@ -163,6 +207,25 @@ static int bench(size_t n, size_t samples) {
     free(a);
     return 0;
 }
+
+/* bench-raw N SAMPLES ITERATIONS -> lines of "elapsed_ns iterations ns_per_call" */
+static int bench_raw(size_t n, size_t samples, uint64_t iterations) {
+    if (n > 16777216 || samples < 1 || samples > 10000 || iterations < 1) return 2;
+    uint64_t *a = NULL;
+    int rc = alloc_bench_buf(n, &a);
+    if (rc) return rc;
+    volatile uint64_t sink = 0;
+    (void)time_iters(a, n, iterations < 8 ? iterations : 8, &sink); /* warmup */
+    for (size_t s = 0; s < samples; ++s) {
+        uint64_t elapsed = time_iters(a, n, iterations, &sink);
+        printf("%" PRIu64 " %" PRIu64 " %.6f\n", elapsed, iterations,
+               (double)elapsed / (double)iterations);
+    }
+    if (sink == UINT64_C(0xdeadbeef)) fprintf(stderr, "sink=%" PRIu64 "\n", sink);
+    free(a);
+    return 0;
+}
+
 static int sum_file(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) { perror("fopen"); return 2; }
@@ -193,6 +256,22 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "probe-tight")) return probe_tight();
     if (argc == 2 && !strcmp(argv[1], "probe-head")) return probe_head();
     if (argc == 3 && !strcmp(argv[1], "sum-file")) return sum_file(argv[2]);
+    if (argc == 5 && !strcmp(argv[1], "calibrate")) {
+        char *e1, *e2, *e3;
+        unsigned long long n = strtoull(argv[2], &e1, 10);
+        unsigned long long target = strtoull(argv[3], &e2, 10);
+        unsigned long long max_iters = strtoull(argv[4], &e3, 10);
+        if (*e1 || *e2 || *e3) return 2;
+        return calibrate((size_t)n, target, max_iters);
+    }
+    if (argc == 5 && !strcmp(argv[1], "bench-raw")) {
+        char *e1, *e2, *e3;
+        unsigned long long n = strtoull(argv[2], &e1, 10);
+        unsigned long long samples = strtoull(argv[3], &e2, 10);
+        unsigned long long iters = strtoull(argv[4], &e3, 10);
+        if (*e1 || *e2 || *e3) return 2;
+        return bench_raw((size_t)n, (size_t)samples, iters);
+    }
     if (argc == 4 && !strcmp(argv[1], "bench")) {
         char *end1, *end2;
         unsigned long long n = strtoull(argv[2], &end1, 10);
@@ -201,6 +280,8 @@ int main(int argc, char **argv) {
         return bench((size_t)n, (size_t)samples);
     }
     fprintf(stderr,
-            "usage: harness verify | probe | probe-tight | probe-head | sum-file PATH | bench N SAMPLES\n");
+            "usage: harness verify | probe | probe-tight | probe-head | sum-file PATH\n"
+            "       | calibrate N TARGET_NS MAX_ITERS | bench-raw N SAMPLES ITERATIONS\n"
+            "       | bench N SAMPLES\n");
     return 2;
 }
