@@ -1,4 +1,6 @@
 import sys
+import platform
+import shutil
 import unittest
 from pathlib import Path
 
@@ -52,11 +54,13 @@ class ParserTests(unittest.TestCase):
 
 
 class LowerNativeTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'darwin' and platform.machine() == 'arm64' and shutil.which('clang'), 'requires macOS arm64 and clang')
     def test_examples_native_match_interpreter(self):
         for name in ('sum.ax', 'find.ax', 'map_filter.ax'):
             result = check_source_equiv((EXAMPLES / name).read_text())
             self.assertTrue(result['ok'], result)
 
+    @unittest.skipUnless(sys.platform == 'darwin' and platform.machine() == 'arm64' and shutil.which('clang'), 'requires macOS arm64 and clang')
     def test_generated_cases_native_match(self):
         for _label, vals in sum_u64.generate_cases(3)[:15]:
             prog = program_sum(vals)

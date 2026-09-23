@@ -53,9 +53,13 @@ class ControllerTests(unittest.TestCase):
             tmp = Path(tmp)
             source = tmp / 'cand.s'
             source.write_text('nop\n')
+            binary = tmp / 'binary'
+            binary.write_bytes(b'fixture')
             record = {
                 'name': 'cand',
                 'source_path': str(source),
+                'binary_path': str(binary),
+                'binary_sha256': lab.sha256_file(binary),
                 'source_sha256': lab.sha256_file(source),
                 'harness_sha256': lab.sha256_file(lab.HARNESS),
                 'verification': {'state': 'built', 'output': None},
@@ -72,6 +76,8 @@ class ControllerTests(unittest.TestCase):
             tmp = Path(tmp)
             source = tmp / 'cand.s'
             source.write_text('nop\n')
+            binary = tmp / 'binary'
+            binary.write_bytes(b'fixture')
             # Point record at a copy of the harness so we can edit it safely.
             harness_copy = tmp / 'harness.c'
             harness_copy.write_bytes(lab.HARNESS.read_bytes())
@@ -81,9 +87,12 @@ class ControllerTests(unittest.TestCase):
                 record = {
                     'name': 'cand',
                     'source_path': str(source),
+                'binary_path': str(binary),
+                'binary_sha256': lab.sha256_file(binary),
                     'source_sha256': lab.sha256_file(source),
                     'harness_sha256': lab.sha256_file(harness_copy),
                     'verification': {'state': 'pass',
+                                     'binary_sha256_at_verify': lab.sha256_file(binary),
                                      'source_sha256_at_verify': lab.sha256_file(source),
                                      'harness_sha256_at_verify': lab.sha256_file(harness_copy)},
                 }

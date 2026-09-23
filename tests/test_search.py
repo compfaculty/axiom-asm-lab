@@ -34,6 +34,7 @@ class SearchTests(unittest.TestCase):
             state = ctrl.run(resume=False)
             self.assertEqual(state['stop_reason'], 'max_proposals')
             self.assertEqual(len(state['attempts']), 2)
+            self.assertTrue(all(a['stage'] == 'imported' for a in state['attempts']))
             self.assertTrue((Path(tmp) / 's1' / 'search_state.json').is_file())
 
     def test_stops_max_seconds(self):

@@ -118,7 +118,6 @@ static int probe_modes(int place_mode) {
         }
         guarded_free(&g);
     }
-    puts("PASS");
     return 0;
 }
 
@@ -135,8 +134,15 @@ static int verify(void) {
     }
     const uint64_t edges[] = {UINT64_MAX, 1, UINT64_MAX, UINT64_MAX, 4, 0, 1};
     for (size_t n = 0; n <= 7; ++n) if (check(edges, n, "overflow")) return 1;
-    /* Centered RO + ABI probe (slack avoids false faults from auto-vectorization). */
-    return probe();
+    /* Every candidate must obey exact bounds, including vectorized code. */
+    int rc = probe_head();
+    if (rc) return rc;
+    rc = probe_tight();
+    if (rc) return rc;
+    rc = probe();
+    if (rc) return rc;
+    puts("PASS");
+    return 0;
 }
 
 static uint64_t ns_now(void) {
@@ -252,9 +258,9 @@ static int sum_file(const char *path) {
 }
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "verify")) return verify();
-    if (argc == 2 && !strcmp(argv[1], "probe")) return probe();
-    if (argc == 2 && !strcmp(argv[1], "probe-tight")) return probe_tight();
-    if (argc == 2 && !strcmp(argv[1], "probe-head")) return probe_head();
+    if (argc == 2 && !strcmp(argv[1], "probe")) { int rc = probe(); if (!rc) puts("PASS"); return rc; }
+    if (argc == 2 && !strcmp(argv[1], "probe-tight")) { int rc = probe_tight(); if (!rc) puts("PASS"); return rc; }
+    if (argc == 2 && !strcmp(argv[1], "probe-head")) { int rc = probe_head(); if (!rc) puts("PASS"); return rc; }
     if (argc == 3 && !strcmp(argv[1], "sum-file")) return sum_file(argv[2]);
     if (argc == 5 && !strcmp(argv[1], "calibrate")) {
         char *e1, *e2, *e3;

@@ -37,7 +37,7 @@ def regression_violations(speedups: Dict[str, float],
                           ceiling: float = REGRESSION_CEILING) -> List[str]:
     """Sizes where candidate is slower than baseline by more than ceiling (ratio < 1-ceiling)."""
     bad = []
-    floor = 1.0 - ceiling
+    floor = 1.0 / (1.0 + ceiling)
     for s, sp in speedups.items():
         if sp < floor:
             bad.append(s)
@@ -64,15 +64,9 @@ def extract_paired_ns(bench_report: dict, baseline: str, candidate: str
         brows = {r['sample_index']: r['ns_per_call'] for r in b[size].get('raw_samples', [])}
         crows = {r['sample_index']: r['ns_per_call'] for r in c[size].get('raw_samples', [])}
         idxs = sorted(set(brows) & set(crows))
-        if not idxs:
-            # Fall back to medians-only pairing (single synthetic pair).
-            bm = b[size].get('median_ns')
-            cm = c[size].get('median_ns')
-            if bm is None or cm is None:
-                continue
-            paired[size] = [(bm, cm)]
-        else:
-            paired[size] = [(brows[i], crows[i]) for i in idxs]
+        if set(brows) != set(crows) or len(brows) != len(b[size].get('raw_samples', [])) or len(crows) != len(c[size].get('raw_samples', [])):
+            raise ValueError('Unmatched or duplicate paired sample indexes')
+        paired[size] = [(brows[i], crows[i]) for i in idxs]
     return paired
 
 
@@ -97,10 +91,12 @@ def paired_bootstrap_ci(paired: Dict[str, List[Tuple[float, float]]],
     """Seeded paired bootstrap on per-size sample pairs; CI for geomean speedup."""
     if not paired:
         raise ValueError('no paired sizes')
+    if resamples < 1 or not 0 < ci_level < 1:
+        raise ValueError('Invalid bootstrap configuration')
     point = _geomean_from_paired(paired)
     rng = random.Random(seed)
     boots = []
-    sizes = list(paired.keys())
+    sizes = sorted(paired, key=int)
     for _ in range(resamples):
         resampled = {}
         for s in sizes:
@@ -147,11 +143,12 @@ def classify_session(baseline_medians: Dict[str, Optional[float]],
         {s: candidate_medians[s] for s in candidate_medians if candidate_medians[s] is not None},
     )
     regs = regression_violations(speedups)
-    if paired is None:
-        paired = {
-            s: [(baseline_medians[s], candidate_medians[s])]
-            for s in speedups
-        }
+    if (paired is None or set(paired) != set(sizes)
+            or any(len(rows) < 30 for rows in paired.values())
+            or any(not math.isfinite(v) or v <= 0
+                   for rows in paired.values() for pair in rows for v in pair)):
+        return {'decision': 'missing_data', 'promote_eligible': False,
+                'reason': 'Require 30 finite positive raw pairs for every objective size'}
     boot = paired_bootstrap_ci(paired, seed=bootstrap_seed, resamples=resamples)
     agg = boot['aggregate_speedup']
     ci_low = boot['ci_low']
@@ -207,6 +204,12 @@ def classify_promotion(session_a: Dict, session_b: Optional[Dict] = None) -> Dic
             'sessions_required': 2,
             'sessions_provided': 1,
         }
+    if (not session_a.get('run_id') or not session_b.get('run_id')
+            or session_a['run_id'] == session_b['run_id']
+            or not session_a.get('identity')
+            or session_a['identity'] != session_b.get('identity')):
+        return {'speed_claim': False, 'decision': 'invalid_sessions',
+                'reason': 'Require distinct runs with matching host, artifacts and objectives'}
     if session_a.get('promote_eligible') and session_b.get('promote_eligible'):
         return {
             'speed_claim': True,
@@ -226,3 +229,50 @@ def classify_promotion(session_a: Dict, session_b: Optional[Dict] = None) -> Dic
         'sessions_required': 2,
         'sessions_provided': 2,
     }
+
+
+def validate_report(report, baseline, candidate, expected_sizes):
+    """Fail closed before statistical analysis; legacy summaries are not evidence."""
+    if not report.get('run_id') or report.get('schema') != 2:
+        raise ValueError('Missing run identity or unsupported report schema')
+    for key in ('host', 'machine', 'clang'):
+        if not report.get(key):
+            raise ValueError('Missing report identity: ' + key)
+    expected = {str(n) for n in expected_sizes}
+    if {str(n) for n in report.get('measure_sizes', [])} != expected or report.get('skipped_sizes'):
+        raise ValueError('Incomplete predefined objective sizes')
+    if report.get('target_sample_ns', 0) < 20_000_000:
+        raise ValueError('Promotion requires 20 ms target samples')
+    for name in (baseline, candidate):
+        var = report.get('variants', {}).get(name, {})
+        if (var.get('lifecycle') != 'measured' or
+                var.get('verification', {}).get('state') != 'pass' or
+                var.get('oracle', {}).get('state') != 'pass'):
+            raise ValueError('Unverified or unmeasured variant: ' + name)
+        for key in ('source_sha256', 'harness_sha256', 'abi_wrap_sha256', 'binary_sha256'):
+            value = var.get(key, '')
+            if not isinstance(value, str) or len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
+                raise ValueError('Missing artifact hash: ' + key)
+        if not var.get('compiler_identity'):
+            raise ValueError('Missing compiler identity')
+        if set(var.get('sizes', {})) != expected:
+            raise ValueError('Incomplete variant sizes')
+        for size, payload in var['sizes'].items():
+            rows = payload.get('raw_samples', [])
+            if len(rows) < 30:
+                raise ValueError('At least 30 raw samples required')
+            indexes = [row.get('sample_index') for row in rows]
+            if any(type(i) is not int or i < 0 for i in indexes) or len(set(indexes)) != len(indexes):
+                raise ValueError('Invalid or duplicate sample indexes')
+            for row in rows:
+                ns = row.get('ns_per_call')
+                if not isinstance(ns, (int, float)) or not math.isfinite(ns) or ns <= 0:
+                    raise ValueError('Non-finite or invalid timing')
+                iters, elapsed = row.get('iterations', 0), row.get('elapsed_ns', 0)
+                if type(iters) is not int or iters <= 0 or not isinstance(elapsed, (float, int)) or elapsed <= 0 or not math.isfinite(elapsed):
+                    raise ValueError('Invalid raw timing counters')
+                if not math.isclose(ns, elapsed / iters, rel_tol=1e-5, abs_tol=0.001):
+                    raise ValueError('Raw timing counters disagree')
+            if payload.get('median_ns') != statistics.median(row['ns_per_call'] for row in rows):
+                raise ValueError('Median disagrees with raw samples')
+    extract_paired_ns(report, baseline, candidate)

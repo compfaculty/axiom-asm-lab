@@ -14,6 +14,8 @@ def _verified_record(tmp: Path):
     harness.write_text('/* h */\n')
     abi = tmp / 'abi_wrap.s'
     abi.write_text('/* a */\n')
+    binary = tmp / 'binary'
+    binary.write_bytes(b'fixture')
     # Point module paths at copies so edits are isolated.
     lab.HARNESS = harness
     lab.ABI_WRAP = abi
@@ -24,9 +26,11 @@ def _verified_record(tmp: Path):
         'source_sha256': lab.sha256_file(source),
         'harness_sha256': lab.sha256_file(harness),
         'abi_wrap_sha256': lab.sha256_file(abi),
-        'binary_sha256': '0' * 64,
+        'binary_path': str(binary),
+        'binary_sha256': lab.sha256_file(binary),
         'verification': {
             'state': 'pass',
+            'binary_sha256_at_verify': lab.sha256_file(binary),
             'output': 'PASS',
             'source_sha256_at_verify': lab.sha256_file(source),
             'harness_sha256_at_verify': lab.sha256_file(harness),
@@ -70,6 +74,21 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(record['lifecycle'], lab.LIFECYCLE_STALE)
             self.assertEqual(record['verification']['state'], 'stale')
             # Stale PASS cannot be reused for timing.
+            with self.assertRaises(RuntimeError):
+                lab.assert_measurable(record)
+
+    def test_binary_change_invalidates_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            record, _, _ = _verified_record(Path(tmp))
+            Path(record['binary_path']).write_bytes(b'replaced')
+            with self.assertRaisesRegex(RuntimeError, 'Binary changed'):
+                lab.assert_measurable(record)
+            self.assertEqual(record['lifecycle'], lab.LIFECYCLE_STALE)
+
+    def test_binary_removal_invalidates_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            record, _, _ = _verified_record(Path(tmp))
+            Path(record['binary_path']).unlink()
             with self.assertRaises(RuntimeError):
                 lab.assert_measurable(record)
 
