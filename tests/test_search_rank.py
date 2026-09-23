@@ -325,5 +325,85 @@ class CatalogProviderTests(unittest.TestCase):
         self.assertIsInstance(get_provider('offline'), OfflineMockProvider)
 
 
+
+class ResumeRecoveryTests(unittest.TestCase):
+    def test_incomplete_stage_not_treated_completed(self):
+        def eval_fn(root, search_dir, proposal, index, state=None):
+            return AttemptRecord(
+                f'id{index}', proposal['candidate_id'],
+                (str(index) + 'e' * 63)[:64], 'ranked',
+                detail={'score': 0.7, 'session': {'decision': 'regression', 'score': 0.7}},
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / 'rec'
+            ctrl = SearchController(
+                ROOT, d,
+                SearchBudgets(max_proposals=1, max_seconds=60, max_stagnation=100),
+                provider=OfflineMockProvider(), evaluate_fn=eval_fn,
+                samples=30, provider_mode='mock')
+            ctrl.run(resume=False)
+            # Inject an interrupted confirming attempt that was wrongly left incomplete.
+            state = json.loads((d / 'search_state.json').read_text())
+            state['attempts'].append({
+                'attempt_id': 'deadbeef',
+                'candidate_id': 'interrupted',
+                'source_sha256': 'f' * 64,
+                'stage': 'confirming',
+                'detail': {'score': 1.5},
+            })
+            state['completed_source_sha256'].append('f' * 64)
+            (d / 'search_state.json').write_text(json.dumps(state))
+            # Orphan dir from crash before state append.
+            orphan = d / 'attempts' / '0099_orphan99ab'
+            orphan.mkdir(parents=True)
+            (orphan / 'attempt.json').write_text(json.dumps({
+                'attempt_id': 'orphan99ab',
+                'candidate_id': 'orphan_cand',
+                'stage': 'proposed',
+                'source_sha256': 'a' * 64,
+            }))
+            ctrl2 = SearchController(
+                ROOT, d,
+                SearchBudgets(max_proposals=3, max_seconds=60, max_stagnation=100),
+                provider=OfflineMockProvider(), evaluate_fn=eval_fn,
+                samples=30, provider_mode='mock')
+            state2 = ctrl2.run(resume=True)
+            stages = {a['attempt_id']: a['stage'] for a in state2['attempts']}
+            self.assertEqual(stages['deadbeef'], 'failed')
+            self.assertNotIn('f' * 64, state2['completed_source_sha256'])
+            orphans = state2.get('orphaned_attempts') or []
+            self.assertTrue(any(o.get('attempt_id') == 'orphan99ab' for o in orphans))
+            self.assertEqual(orphans[0]['stage'], 'failed')
+            # Proposal index still advances only via attempts list, not orphans.
+            self.assertEqual(state2['stop_reason'], 'max_proposals')
+            self.assertEqual(len(state2['attempts']), 3)
+
+
+class NeonNativeTests(unittest.TestCase):
+    @unittest.skipUnless(
+        __import__('sys').platform == 'darwin'
+        and __import__('platform').machine() == 'arm64'
+        and __import__('shutil').which('clang'),
+        'requires macOS arm64 and clang')
+    def test_neon_odd_lengths_and_boundaries(self):
+        import tempfile
+        from evaluate import build_and_verify
+        with tempfile.TemporaryDirectory() as tmp:
+            binary, record = build_and_verify(
+                'neon_sum', ROOT / 'asm' / 'neon_sum.s', Path(tmp))
+            self.assertEqual(record['lifecycle'], 'verified')
+            self.assertEqual(record['oracle']['state'], 'pass')
+            # Spot-check odd and NEON-boundary lengths via harness sum-file.
+            from kernels.sum_u64 import oracle, write_sum_file
+            import lab
+            for n in (0, 1, 3, 5, 7, 9, 15, 17):
+                values = [(i * 0x9E3779B97F4A7C15) & ((1 << 64) - 1) for i in range(n)]
+                path = Path(tmp) / f'n{n}.txt'
+                write_sum_file(path, values)
+                got = int(lab.run([str(binary), 'sum-file', str(path)], timeout=30))
+                self.assertEqual(got, oracle(values), f'n={n}')
+
+
 if __name__ == '__main__':
     unittest.main()

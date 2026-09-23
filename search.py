@@ -256,6 +256,85 @@ class SearchController:
         if 'smoke' in state and bool(state.get('smoke')) != bool(self.smoke):
             raise RuntimeError('resume smoke/protocol mode mismatch')
 
+    COMPLETE_STAGES = frozenset({
+        'measured', 'ranked', 'accepted', 'rejected', 'failed', 'skipped', 'imported',
+    })
+    INCOMPLETE_STAGES = frozenset({
+        'proposed', 'built', 'verified', 'confirming',
+    })
+
+    def reconcile_incomplete_attempts(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Mark interrupted mid-stage attempts failed; never treat them as completed.
+
+        Also invalidates completed_source_sha256 entries for those attempts so
+        the same source can be re-evaluated after resume.
+        """
+        done = set(state.get('completed_source_sha256') or [])
+        changed = False
+        for attempt in state.get('attempts') or []:
+            stage = attempt.get('stage')
+            if stage in self.INCOMPLETE_STAGES:
+                src = attempt.get('source_sha256')
+                attempt['stage'] = 'failed'
+                detail = dict(attempt.get('detail') or {})
+                detail['error'] = 'interrupted_incomplete_stage:' + str(stage)
+                detail['prior_stage'] = stage
+                detail['score'] = None
+                attempt['detail'] = detail
+                if src in done:
+                    done.discard(src)
+                changed = True
+        # Orphan attempt dirs left by a crash before state append are incomplete
+        # evidence and must not be treated as finished work. Record separately so
+        # catalog/proposal index alignment is preserved.
+        attempts_root = self.search_dir / 'attempts'
+        recorded_ids = {a.get('attempt_id') for a in (state.get('attempts') or [])}
+        orphans = list(state.get('orphaned_attempts') or [])
+        known_orphan_ids = {o.get('attempt_id') for o in orphans}
+        if attempts_root.is_dir():
+            for path in sorted(attempts_root.iterdir()):
+                if not path.is_dir():
+                    continue
+                parts = path.name.split('_', 1)
+                aid = parts[1] if len(parts) == 2 else path.name
+                if aid in recorded_ids or aid in known_orphan_ids:
+                    continue
+                marker = path / 'attempt.json'
+                stage = 'proposed'
+                src_hash = None
+                if marker.is_file():
+                    try:
+                        payload = json.loads(marker.read_text())
+                        stage = payload.get('stage') or stage
+                        src_hash = payload.get('source_sha256')
+                        if not src_hash and isinstance(payload.get('detail'), dict):
+                            src_hash = payload['detail'].get('source_sha256')
+                    except (OSError, json.JSONDecodeError, TypeError):
+                        pass
+                orphan = {
+                    'attempt_id': aid,
+                    'candidate_id': payload_candidate(path),
+                    'source_sha256': src_hash or ('orphan_' + aid),
+                    'stage': 'failed',
+                    'detail': {
+                        'error': 'orphan_incomplete_attempt_dir',
+                        'prior_stage': stage,
+                        'path': str(path),
+                        'score': None,
+                    },
+                }
+                orphans.append(orphan)
+                if src_hash and src_hash in done:
+                    done.discard(src_hash)
+                changed = True
+                atomic_write_json(path / 'attempt.json', orphan)
+        state['orphaned_attempts'] = orphans
+        state['completed_source_sha256'] = sorted(done)
+        if changed:
+            state['status'] = 'resuming'
+            self.save(state)
+        return state
+
     def stop_reason(self, state: Dict[str, Any]) -> Optional[str]:
         if len(state['attempts']) >= self.budgets.max_proposals:
             return 'max_proposals'
@@ -267,6 +346,8 @@ class SearchController:
 
     def run(self, resume: bool = False) -> Dict[str, Any]:
         state = self.load_or_init(resume)
+        if resume:
+            state = self.reconcile_incomplete_attempts(state)
         state['wall_started'] = state.get('wall_started') or time.time()
         state['status'] = 'running'
         state.setdefault('active_eval_seconds', 0.0)
@@ -325,7 +406,9 @@ class SearchController:
             elapsed = time.time() - t0
             state['active_eval_seconds'] = float(state.get('active_eval_seconds') or 0) + elapsed
             state['attempts'].append(asdict(attempt))
-            done_hashes.add(src_hash)
+            # Only completed evaluation stages consume the source hash.
+            if attempt.stage not in self.INCOMPLETE_STAGES:
+                done_hashes.add(src_hash)
             state['completed_source_sha256'] = sorted(done_hashes)
 
             self._update_ranking(state, attempt)
@@ -415,6 +498,25 @@ class SearchController:
         path = self.search_dir / 'search_summary.md'
         path.write_text('\n'.join(lines) + '\n')
         return path
+
+
+def payload_candidate(attempt_dir: Path) -> str:
+    marker = attempt_dir / 'attempt.json'
+    if marker.is_file():
+        try:
+            data = json.loads(marker.read_text())
+            cid = data.get('candidate_id')
+            if cid:
+                return str(cid)
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+    inp = attempt_dir / 'input.json'
+    if inp.is_file():
+        try:
+            return str(json.loads(inp.read_text()).get('candidate_id') or 'unknown')
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+    return 'unknown'
 
 
 def default_evaluate_attempt(root: Path, search_dir: Path, proposal: Dict[str, Any],
