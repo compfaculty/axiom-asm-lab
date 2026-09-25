@@ -1,6 +1,6 @@
 # Open this folder in Cursor
 
-**Current status:** verification-integrity fixes are awaiting native validation. Read docs/VERIFICATION_REVIEW.md before advancing the task ledger. Historical milestone completion claims are under review.
+**Current status:** M004 sum_u64 optimization loop complete (shared evaluate, ranking, confirmation, recoverable catalog search). Next: T010 kernel portfolio. See docs/SESSION_LOG.md and evidence/T009.md.
 
 Extract the ZIP, then use **Open Folder** on `axiom-asm-lab` (the directory containing this file). The folder includes `.cursor/rules/axiom.mdc`, root `AGENTS.md`, source code, specs, a task ledger, and completion criteria.
 
@@ -15,10 +15,11 @@ python3 scripts/check_project.py
 python3 -m unittest discover -s tests -v
 python3 lab.py doctor
 python3 lab.py verify
-python3 lab.py bench --samples 15 --output results/initial.json
+python3 lab.py search --dir build/searches/smoke --smoke --provider catalog --max-proposals 2 --samples 3
+python3 lab.py search --dir build/searches/run1 --provider catalog --max-proposals 5 --samples 30 --seed 1
 ```
 
-The last three require Apple Silicon macOS. No Python dependencies are required for the bootstrap. Install Xcode Command Line Tools if `clang` is absent. The optional editor task file exposes the same commands.
+The last four require Apple Silicon macOS. Search without `--smoke` enforces the full measurement protocol (30 pairs, all objective sizes, confirmation when eligible). Time budgets count **active evaluation seconds** only.
 
 ## What is here now
 Two sum assembly fixtures, a C baseline, a basic verifier, a sequential benchmark controller, and a development specification. Existing source is intentionally small. Guard pages, ABI validation, reliable performance promotion, model adapters, hardware exploration, and a language front end remain explicit implementation tasks.

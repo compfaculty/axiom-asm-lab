@@ -490,15 +490,31 @@ def main():
     mock_p = sub.add_parser('propose-mock')
     mock_p.add_argument('--candidate-id', default='mock_scalar_copy')
     mock_p.add_argument('--output', type=Path, default=None)
-    search_cmd = sub.add_parser('search')
+    search_cmd = sub.add_parser(
+        'search',
+        epilog=(
+            'Time budget counts active evaluation seconds only (not idle gaps '
+            'between resumes). Use --smoke for a non-promotional end-to-end check; '
+            'full search without --smoke enforces the measurement protocol.'
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     search_cmd.add_argument('--dir', type=Path, required=True,
                             help='Search directory for atomic state')
     search_cmd.add_argument('--resume', action='store_true')
     search_cmd.add_argument('--max-proposals', type=int, default=20)
-    search_cmd.add_argument('--max-seconds', type=float, default=1800.0)
+    search_cmd.add_argument('--max-seconds', type=float, default=1800.0,
+                            help='Active evaluation-time budget in seconds')
     search_cmd.add_argument('--max-stagnation', type=int, default=5)
-    search_cmd.add_argument('--provider', default='offline',
-                            help='offline (default) or online (requires config)')
+    search_cmd.add_argument(
+        '--provider', default='catalog',
+        help='catalog (default real variants), mock (pipeline fixture), or online')
+    search_cmd.add_argument(
+        '--smoke', action='store_true',
+        help='Non-promotional smoke: short sizes/samples; cannot accept winners')
+    search_cmd.add_argument('--samples', type=int, default=None,
+                            help='Samples per size (protocol default 30; smoke default 3)')
+    search_cmd.add_argument('--seed', type=int, default=DEFAULT_BENCH_SEED)
     port = sub.add_parser('portfolio')
     port.add_argument('--seed', type=int, default=1)
     port.add_argument('--output', type=Path, default=None)
@@ -511,9 +527,19 @@ def main():
                     help='JSON proposal path (omit with --mock)')
     ev.add_argument('--mock', action='store_true', help='Use deterministic mock proposer')
     ev.add_argument('--candidate-id', default='mock_scalar_copy')
-    ev.add_argument('--samples', type=int, default=3)
+    ev.add_argument('--samples', type=int, default=None,
+                    help='Samples per size (protocol default 30; smoke default 3)')
     ev.add_argument('--seed', type=int, default=DEFAULT_BENCH_SEED)
     ev.add_argument('--output', type=Path, default=None)
+    ev_mode = ev.add_mutually_exclusive_group()
+    ev_mode.add_argument(
+        '--protocol', action='store_true',
+        help='Full protocol measure paired with clang_o3 (for search ranking)')
+    ev_mode.add_argument(
+        '--smoke', action='store_true',
+        help='Short non-promotional measure (cannot rank/promote)')
+    ev.add_argument('--target-sample-ms', type=float, default=None)
+    ev.add_argument('--memory-cap-bytes', type=int, default=DEFAULT_MEMORY_CAP_BYTES)
     cmp_cmd = sub.add_parser('compare')
     cmp_cmd.add_argument('--baseline', default='clang_o3')
     cmp_cmd.add_argument('--candidate', required=True)
@@ -556,22 +582,38 @@ def main():
                 sys.stdout.write(text)
             return
         if args.command == 'search':
-            from search import SearchBudgets, SearchController, get_provider
+            from search import SearchBudgets, SearchController, get_provider, make_evaluate_fn
             provider = get_provider(args.provider)
+            smoke = bool(args.smoke)
+            samples = args.samples if args.samples is not None else (3 if smoke else 30)
+            if not 3 <= samples <= 100:
+                parser.error('--samples must be between 3 and 100')
+            if not smoke and samples < 30:
+                parser.error('protocol search requires --samples >= 30 (or use --smoke)')
             budgets = SearchBudgets(
                 max_proposals=args.max_proposals,
                 max_seconds=args.max_seconds,
                 max_stagnation=args.max_stagnation,
             )
-            from search import native_evaluate_attempt
-            ctrl = SearchController(ROOT, args.dir.resolve(), budgets, provider=provider,
-                                    evaluate_fn=native_evaluate_attempt)
+            eval_fn = make_evaluate_fn(
+                smoke=smoke, samples=samples, seed=args.seed,
+                memory_cap_bytes=DEFAULT_MEMORY_CAP_BYTES)
+            ctrl = SearchController(
+                ROOT, args.dir.resolve(), budgets, provider=provider,
+                evaluate_fn=eval_fn, smoke=smoke,
+                samples=samples, seed=args.seed,
+                provider_mode=args.provider)
             state = ctrl.run(resume=args.resume)
+            summary_path = ctrl.write_summary(state)
             print(json.dumps({
                 'status': state.get('status'),
                 'stop_reason': state.get('stop_reason'),
                 'attempts': len(state.get('attempts') or []),
+                'best_observed': state.get('best_observed'),
+                'accepted': state.get('accepted'),
+                'active_eval_seconds': state.get('active_eval_seconds'),
                 'state': str(ctrl.state_path),
+                'summary': str(summary_path),
             }, indent=2))
             return
         if args.command == 'portfolio':
@@ -641,18 +683,38 @@ def main():
             return
         if args.command == 'evaluate-proposal':
             from proposals import import_proposal, mock_propose, validate_proposal
-            from sampling import (
-                DEFAULT_MEMORY_CAP_BYTES,
-                MAX_CALIBRATE_ITERS,
-                cache_mode_label,
-                filter_sizes_for_cap,
-                host_notes,
-                paired_schedule,
+            from evaluate import (
+                PROTOCOL_MIN_SAMPLES,
+                PROTOCOL_SIZES,
+                SMOKE_SIZES,
+                SMOKE_TARGET_NS,
+                build_and_verify,
+                ensure_baseline_clang,
+                measure_paired,
+                write_bench_report,
             )
+            from sampling import TARGET_SAMPLE_NS as _TSN
             if args.mock == bool(args.proposal):
                 parser.error('evaluate-proposal requires exactly one of --mock or --proposal')
-            if not 3 <= args.samples <= 100:
+            if args.protocol:
+                protocol = True
+            elif args.smoke:
+                protocol = False
+            else:
+                # Backward-compatible default: non-promotional smoke unless --protocol.
+                protocol = False
+            samples = args.samples if args.samples is not None else (
+                PROTOCOL_MIN_SAMPLES if protocol else 3)
+            if not 3 <= samples <= 100:
                 parser.error('--samples must be between 3 and 100')
+            if protocol and samples < PROTOCOL_MIN_SAMPLES:
+                parser.error('--protocol requires --samples >= 30')
+            if args.target_sample_ms is not None:
+                target_ns = int(args.target_sample_ms * 1_000_000)
+            else:
+                target_ns = int(_TSN) if protocol else SMOKE_TARGET_NS
+            if protocol and target_ns < 20_000_000:
+                parser.error('--protocol requires target sample >= 20 ms')
             early_output = args.output.resolve() if args.output else None
             if early_output is not None:
                 refuse_overwrite(early_output)
@@ -666,98 +728,54 @@ def main():
             print('Imported ' + imported['candidate_id'] + ' -> ' + imported['dir'], flush=True)
             name = imported['candidate_id']
             source = Path(imported['source_path'])
-            binary, record = compile_one(name, source, run_dir)
-            try:
-                verify_binary(binary, record, run_dir=run_dir)
-                oracle_result = oracle_check(binary, run_dir)
-                finalize_verified(record, oracle_result)
-            except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                if record.get('lifecycle') != LIFECYCLE_FAILED:
-                    mark_failed(record, 'proposal_verify_failed', run_dir=run_dir)
-                raise
-            disasm = capture_disassembly(binary, run_dir, name)
-            record['disassembly'] = str(disasm.resolve())
+            records = {}
+            binaries = {}
+            binary, record = build_and_verify(name, source, run_dir)
+            records[name] = record
+            binaries[name] = binary
             print(name + ': PASS', flush=True)
-            # Short calibrated measure for pipeline proof (not a promotion session).
-            from sampling import TARGET_SAMPLE_NS as _TSN
-            target_ns = min(5_000_000, _TSN)
-            measure_sizes = filter_sizes_for_cap((0, 1, 16, 1024), DEFAULT_MEMORY_CAP_BYTES)
-            entries = {
-                name: {
-                    'lifecycle': record['lifecycle'],
-                    'source_sha256': record['source_sha256'],
-                    'proposal': imported,
-                    'disassembly': record.get('disassembly'),
-                    'verification': record['verification'],
-                    'oracle': record['oracle'],
-                    'calibration': {},
-                    'sizes': {},
-                }
-            }
-            for n in measure_sizes:
-                assert_measurable(record)
-                cal = calibrate_iterations(binary, n, target_ns, MAX_CALIBRATE_ITERS)
-                entries[name]['calibration'][str(n)] = cal
-            schedule = paired_schedule([name], measure_sizes, args.samples, args.seed)
-            raw_samples = []
-            buckets = {(name, n): [] for n in measure_sizes}
-            for step in schedule:
-                n = step['size']
-                assert_measurable(record)
-                iters = entries[name]['calibration'][str(n)]['iterations']
-                sample = run_bench_raw_one(binary, n, iters)
-                sample_rec = {
-                    'size': n,
-                    'sample_index': step['sample_index'],
-                    'variant': name,
-                    'iterations': sample['iterations'],
-                    'elapsed_ns': sample['elapsed_ns'],
-                    'ns_per_call': sample['ns_per_call'],
-                    'cache_mode': cache_mode_label(n),
-                }
-                raw_samples.append(sample_rec)
-                buckets[(name, n)].append(sample_rec)
-            for n in measure_sizes:
-                rows = buckets[(name, n)]
-                ns_list = [r['ns_per_call'] for r in rows]
-                entries[name]['sizes'][str(n)] = {
-                    'cache_mode': cache_mode_label(n),
-                    'raw_samples': rows,
-                    'ns_per_call': ns_list,
-                    'median_ns': statistics.median(ns_list),
-                }
-            record['lifecycle'] = LIFECYCLE_MEASURED
-            entries[name]['lifecycle'] = LIFECYCLE_MEASURED
+            if protocol:
+                ensure_baseline_clang(run_dir, records, binaries)
+                print('clang_o3: PASS', flush=True)
+            sizes = PROTOCOL_SIZES if protocol else SMOKE_SIZES
+            entries, raw_samples, measure_sizes, skipped_sizes = measure_paired(
+                records, binaries,
+                sizes=sizes,
+                samples=samples,
+                seed=args.seed,
+                target_sample_ns=target_ns,
+                memory_cap_bytes=args.memory_cap_bytes,
+            )
+            for key, entry in entries.items():
+                if key == name:
+                    entry['proposal'] = imported
             output = early_output if early_output else default_bench_output(run_id)
-            refuse_overwrite(output)
-            output.parent.mkdir(parents=True, exist_ok=True)
-            samples_path = output.parent / 'samples.jsonl'
-            refuse_overwrite(samples_path)
-            with samples_path.open('w') as fh:
-                for row in raw_samples:
-                    fh.write(json.dumps(row) + '\n')
-            report = {
-                'schema': 2,
-                'run_id': run_id,
-                'command': 'evaluate-proposal',
-                'proposal_import': imported,
-                'timestamp_utc': datetime.now(timezone.utc).isoformat(),
-                'host': platform.platform(),
-                'machine': platform.machine(),
-                'clang': clang_identity(),
-                'samples_per_size': args.samples,
-                'seed': args.seed,
-                'samples_jsonl': str(samples_path.resolve()),
-                'host_notes': host_notes('evaluate-proposal'),
-                'variants': entries,
-            }
-            output.write_text(json.dumps(report, indent=2) + '\n')
-            write_manifest(run_dir, run_id, 'evaluate-proposal', {name: record}, {
+            report = write_bench_report(
+                run_id=run_id,
+                run_dir=run_dir,
+                command='evaluate-proposal',
+                entries=entries,
+                raw_samples=raw_samples,
+                measure_sizes=measure_sizes,
+                skipped_sizes=skipped_sizes,
+                samples=samples,
+                seed=args.seed,
+                target_sample_ns=target_ns,
+                memory_cap_bytes=args.memory_cap_bytes,
+                output=output,
+                promotional=protocol,
+                extra={'proposal_import': imported},
+            )
+            write_manifest(run_dir, run_id, 'evaluate-proposal', records, {
                 'bench_output': str(output.resolve()),
                 'proposal_dir': imported['dir'],
+                'promotional': protocol,
             })
             print('Saved ' + str(output))
             print('Run ' + run_id + ' -> ' + str(run_dir / 'manifest.json'))
+            if not protocol:
+                print('NOTE: non-promotional smoke report; not valid for ranking/promotion',
+                      flush=True)
             return
         if args.command == 'compare':
             from analysis import (
@@ -874,128 +892,43 @@ def main():
         target_ns = int(args.target_sample_ms * 1_000_000)
         if target_ns < 1_000_000:
             parser.error('--target-sample-ms too small')
-        measure_sizes = filter_sizes_for_cap(SIZES, args.memory_cap_bytes)
-        skipped_sizes = [n for n in SIZES if n not in measure_sizes]
+        from evaluate import measure_paired, write_bench_report
+        entries, raw_samples, measure_sizes, skipped_sizes = measure_paired(
+            records, binaries,
+            sizes=SIZES,
+            samples=args.samples,
+            seed=args.seed,
+            target_sample_ns=target_ns,
+            memory_cap_bytes=args.memory_cap_bytes,
+        )
         if skipped_sizes:
             print('Skipping sizes over memory cap '
                   + str(args.memory_cap_bytes) + ': ' + str(skipped_sizes), flush=True)
-        if not measure_sizes:
-            raise RuntimeError('No sizes remain under memory cap')
-
-        entries = {}
-        for name, record in records.items():
-            assert_measurable(record)
-            entries[name] = {
-                'lifecycle': record['lifecycle'],
-                'source_sha256': record['source_sha256'],
-                'harness_sha256': record['harness_sha256'],
-                'abi_wrap_sha256': record['abi_wrap_sha256'],
-                'binary_sha256': record['binary_sha256'],
-                'binary_bytes': record['binary_bytes'],
-                'build_argv': record['build_argv'],
-                'compiler_identity': record['compiler_identity'],
-                'verification': record['verification'],
-                'oracle': record['oracle'],
-                'diagnostics': record.get('diagnostics'),
-                'disassembly': record.get('disassembly'),
-                'calibration': {},
-                'sizes': {},
-            }
-
-        # Calibrate iterations per (variant, size).
-        for n in measure_sizes:
-            for name in entries:
-                assert_measurable(records[name])
-                cal = calibrate_iterations(
-                    binaries[name], n, target_ns, MAX_CALIBRATE_ITERS)
-                entries[name]['calibration'][str(n)] = cal
-                flag = 'CAP' if cal['capped'] and not cal['reached_target'] else 'ok'
-                print(f'calibrate {name:12} n={n:8} iters={cal["iterations"]:<10} '
-                      f'elapsed_ns={cal["elapsed_ns"]:<12} {flag}', flush=True)
-
-        schedule = paired_schedule(
-            list(entries.keys()), measure_sizes, args.samples, args.seed)
-        raw_samples = []
-        # Accumulate per-variant/size lists while respecting paired order.
-        buckets = {(name, n): [] for name in entries for n in measure_sizes}
-        for step in schedule:
-            name = step['variant']
-            n = step['size']
-            assert_measurable(records[name])
-            iters = entries[name]['calibration'][str(n)]['iterations']
-            sample = run_bench_raw_one(binaries[name], n, iters)
-            sample_rec = {
-                'size': n,
-                'sample_index': step['sample_index'],
-                'variant': name,
-                'iterations': sample['iterations'],
-                'elapsed_ns': sample['elapsed_ns'],
-                'ns_per_call': sample['ns_per_call'],
-                'cache_mode': cache_mode_label(n),
-            }
-            raw_samples.append(sample_rec)
-            buckets[(name, n)].append(sample_rec)
-            print(f'{name:12} n={n:8} i={step["sample_index"]:<3} '
-                  f'ns/call={sample["ns_per_call"]:12.3f}', flush=True)
-
-        for name in entries:
-            for n in measure_sizes:
-                rows = buckets[(name, n)]
-                ns_list = [r['ns_per_call'] for r in rows]
-                entries[name]['sizes'][str(n)] = {
-                    'cache_mode': cache_mode_label(n),
-                    'array_bytes': n * 8,
-                    'calibration': entries[name]['calibration'][str(n)],
-                    'raw_samples': rows,
-                    'ns_per_call': ns_list,
-                    'median_ns': statistics.median(ns_list),
-                }
-
-        for name, record in records.items():
-            record['lifecycle'] = LIFECYCLE_MEASURED
-            entries[name]['lifecycle'] = LIFECYCLE_MEASURED
-            append_diagnostic(record, 'measured', {
-                'sizes': measure_sizes,
-                'seed': args.seed,
-                'samples_per_size': args.samples,
-            })
-
         output = early_output if early_output is not None else default_bench_output(run_id)
-        refuse_overwrite(output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        samples_path = output.parent / 'samples.jsonl'
-        refuse_overwrite(samples_path)
-        with samples_path.open('w') as fh:
-            for row in raw_samples:
-                fh.write(json.dumps(row) + '\n')
-        report = {
-            'schema': 2,
-            'run_id': run_id,
-            'timestamp_utc': datetime.now(timezone.utc).isoformat(),
-            'host': platform.platform(),
-            'machine': platform.machine(),
-            'clang': clang_identity(),
-            'samples_per_size': args.samples,
-            'seed': args.seed,
-            'target_sample_ns': target_ns,
-            'memory_cap_bytes': args.memory_cap_bytes,
-            'measure_sizes': measure_sizes,
-            'skipped_sizes': skipped_sizes,
-            'schedule_len': len(schedule),
-            'host_notes': host_notes(args.host_notes),
-            'samples_jsonl': str(samples_path.resolve()),
-            'run_dir': str(run_dir.resolve()),
-            'variants': entries,
-        }
-        output.write_text(json.dumps(report, indent=2) + '\n')
+        report = write_bench_report(
+            run_id=run_id,
+            run_dir=run_dir,
+            command='bench',
+            entries=entries,
+            raw_samples=raw_samples,
+            measure_sizes=measure_sizes,
+            skipped_sizes=skipped_sizes,
+            samples=args.samples,
+            seed=args.seed,
+            target_sample_ns=target_ns,
+            memory_cap_bytes=args.memory_cap_bytes,
+            output=output,
+            host_notes_extra=args.host_notes,
+            promotional=True,
+        )
         write_manifest(run_dir, run_id, 'bench', records, {
             'bench_output': str(output.resolve()),
-            'samples_jsonl': str(samples_path.resolve()),
+            'samples_jsonl': report['samples_jsonl'],
             'samples_per_size': args.samples,
             'seed': args.seed,
         })
         print('Saved ' + str(output))
-        print('Samples ' + str(samples_path))
+        print('Samples ' + report['samples_jsonl'])
         print('Run ' + run_id + ' -> ' + str(run_dir / 'manifest.json'))
     except (RuntimeError, FileNotFoundError, FileExistsError, MemoryError,
             subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError) as exc:
