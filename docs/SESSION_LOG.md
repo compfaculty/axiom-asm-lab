@@ -121,3 +121,27 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - Resume requires matching source fingerprint and seed; older state files require a new search directory.
 - Tests: 116 discovered, 111 passed, five native checks skipped on Linux; bookkeeping and diff checks passed. No native performance claim.
 - Plan: docs/NEXT_CURSOR_PLAN.md. T009R tracks native validation; T009H tracks remaining recovery/evidence integrity work before T010. Historical native evidence is retained.
+
+## 2026-09-25 — T009R native validation (M004 recovery)
+- Host: macOS 26.6.2 arm64, Python 3.14.7, Apple clang 21.0.0. Git `7f7915b`.
+- Commands: check_project 0; unittest 116 OK; verify 0; fault-matrix 7/7; review-smoke 0; review-protocol 0 (2 attempts); resume → 5 attempts; accepted=null.
+- Evidence: `evidence/T009R.md`. Status: T009R `done`.
+- Next: T009H recovery/evidence hardening.
+
+## 2026-09-25 — T009H recovery hardening
+- Changes: search-dir flock; in-flight checkpoints + conservative interrupt charging; measurement evidence revalidation on resume; retryable catalog index; incumbent score policy; resume identity includes cpu_brand + normalized compiler flags (schema 3).
+- Commands: unittest 127 OK; harden-smoke search 0.
+- Evidence: `evidence/T009H.md`. Status: T009H `done`. Milestone path opens T010.
+- Next task: T010 — per-kernel descriptors through shared evaluate pipeline.
+- Next command: inspect `kernels/` contracts and `evaluate.py` routing; implement find_u8 then map_filter dispatch.
+
+## 2026-09-25 — T010/T011/T012 complete (M005–M006)
+- T010: per-kernel descriptors + harness_find/map_filter + wrong fixtures; `lab.py kernel-eval` PASS (3 kernels, wrong blocked); portfolio PASS.
+- T011/T012: lowering bound to descriptors; child-isolated native runs; return-size checks; fresh disasm; SUBSET.md updated.
+- Stage 4 deferred: `docs/ADR_STAGE4_DEFER.md`.
+- Commands: unittest 134 OK; kernel-eval 0; lang-check 0; check_project 0.
+- Evidence: `evidence/T010.md`, `T011.md`, `T012.md`. Status: all tasks done; `current_milestone=M006`.
+- Next: M007 only after ADR implementation plan; optional expand find/map search catalogs.
+- Next command: `python3 scripts/check_project.py`
+
+

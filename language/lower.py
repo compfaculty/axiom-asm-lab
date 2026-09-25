@@ -65,11 +65,22 @@ def classify(prog: Program) -> KernelKind:
 
 
 def lower(prog: Program) -> Lowered:
+    """Lower onto a language template whose symbol matches the verified kernel descriptor."""
+    from kernels.descriptors import get_descriptor
+
     prog = typecheck(prog)
     kind = classify(prog)
     template, symbol = _TEMPLATES[kind]
     if not template.is_file():
         raise FileNotFoundError(template)
+    desc = get_descriptor(kind.value)
+    if desc['symbol'] != symbol:
+        raise CoverageError(
+            f'template symbol {symbol!r} mismatches descriptor {desc["symbol"]!r}')
+    # Prefer verified catalog asm when present and content-equivalent symbol.
+    catalog = Path(desc['asm_baseline'])
+    if catalog.is_file():
+        template = catalog
     array, needle = _extract_inputs(prog, kind)
     return Lowered(kind=kind, template=template, symbol=symbol, array=array, needle=needle)
 

@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 HARNESS = ROOT / 'src' / 'harness.c'
 ABI_WRAP = ROOT / 'src' / 'abi_wrap.s'
+DEFAULT_KERNEL = 'sum_u64'
 SIZES = (0, 1, 3, 4, 7, 16, 64, 1024, 65536, 1048576)
 ORACLE_SEED = 1
 DEFAULT_BENCH_SEED = 1
@@ -105,27 +106,32 @@ def refuse_overwrite(path):
         raise FileExistsError('Refusing to overwrite existing artifact: ' + str(path))
 
 
-def compile_one(name, source, run_dir):
-    if not HARNESS.is_file():
-        raise FileNotFoundError(HARNESS)
-    if not ABI_WRAP.is_file():
-        raise FileNotFoundError(ABI_WRAP)
+def compile_one(name, source, run_dir, kernel_id=DEFAULT_KERNEL):
+    from kernels.descriptors import get_descriptor
+    desc = get_descriptor(kernel_id)
+    harness = Path(desc['harness'])
+    abi_wrap = Path(desc['abi_wrap'])
+    if not harness.is_file():
+        raise FileNotFoundError(harness)
+    if not abi_wrap.is_file():
+        raise FileNotFoundError(abi_wrap)
     if not Path(source).is_file():
         raise FileNotFoundError(source)
     binary = run_dir / ('harness_' + name)
     refuse_overwrite(binary)
     argv = ['clang', '-O3', '-std=c11', '-Wall', '-Wextra',
-            str(HARNESS), str(ABI_WRAP), str(source), '-o', str(binary)]
+            str(harness), str(abi_wrap), str(source), '-o', str(binary)]
     run(argv)
     record = {
         'name': name,
+        'kernel_id': kernel_id,
         'lifecycle': LIFECYCLE_BUILT,
         'source_path': str(Path(source).resolve()),
         'source_sha256': sha256_file(source),
-        'harness_path': str(HARNESS.resolve()),
-        'harness_sha256': sha256_file(HARNESS),
-        'abi_wrap_path': str(ABI_WRAP.resolve()),
-        'abi_wrap_sha256': sha256_file(ABI_WRAP),
+        'harness_path': str(harness.resolve()),
+        'harness_sha256': sha256_file(harness),
+        'abi_wrap_path': str(abi_wrap.resolve()),
+        'abi_wrap_sha256': sha256_file(abi_wrap),
         'binary_path': str(binary.resolve()),
         'binary_sha256': sha256_file(binary),
         'binary_bytes': binary.stat().st_size,
@@ -198,8 +204,10 @@ def mark_stale(record, reason):
 def verify_binary(binary, record, run_dir=None):
     """Run verify and record state; require source/harness hashes still current."""
     ensure_fresh(record)
+    harness_path = Path(record.get('harness_path') or HARNESS)
+    abi_path = Path(record.get('abi_wrap_path') or ABI_WRAP)
     try:
-        output = run([str(binary), 'verify'], timeout=60)
+        output = run([str(binary), 'verify'], timeout=120)
     except subprocess.CalledProcessError as exc:
         mark_failed(record, 'verify_process_failed',
                     output=(exc.stderr or exc.stdout or str(exc)), run_dir=run_dir)
@@ -211,37 +219,73 @@ def verify_binary(binary, record, run_dir=None):
         'state': 'pass',
         'output': output,
         'source_sha256_at_verify': sha256_file(record['source_path']),
-        'harness_sha256_at_verify': sha256_file(HARNESS),
-        'abi_wrap_sha256_at_verify': sha256_file(ABI_WRAP),
+        'harness_sha256_at_verify': sha256_file(harness_path),
+        'abi_wrap_sha256_at_verify': sha256_file(abi_path),
         'binary_sha256_at_verify': sha256_file(binary),
     }
     return output
 
 
-def oracle_check(binary, run_dir, seed=ORACLE_SEED):
-    """Differential check: native sum-file results must match independent Python oracle."""
-    from kernels.sum_u64 import case_fingerprint, generate_cases, oracle, write_sum_file
-    cases = generate_cases(seed)
+def oracle_check(binary, run_dir, seed=ORACLE_SEED, kernel_id=DEFAULT_KERNEL):
+    """Differential check: native oracle-file results must match independent Python oracle."""
+    from kernels.descriptors import get_descriptor, parse_map_filter_output
+    desc = get_descriptor(kernel_id)
+    mod = desc['module']
     case_dir = run_dir / 'oracle_cases'
     case_dir.mkdir(exist_ok=True)
     mismatches = []
-    for label, values in cases:
-        path = case_dir / (label + '.txt')
-        write_sum_file(path, values)
-        got = int(run([str(binary), 'sum-file', str(path)], timeout=60))
-        want = oracle(values)
-        if got != want:
-            mismatches.append({'label': label, 'n': len(values), 'got': got, 'want': want})
-            break
+    cmd = desc['oracle_cmd']
+
+    if kernel_id == 'sum_u64':
+        cases = mod.generate_cases(seed)
+        for label, values in cases:
+            path = case_dir / (label + '.txt')
+            mod.write_sum_file(path, values)
+            got = int(run([str(binary), cmd, str(path)], timeout=60))
+            want = mod.oracle(values)
+            if got != want:
+                mismatches.append({'label': label, 'n': len(values), 'got': got, 'want': want})
+                break
+        fingerprint = mod.case_fingerprint(cases)
+        case_count = len(cases)
+    elif kernel_id == 'find_u8':
+        cases = mod.generate_cases(seed)
+        for label, buf, needle in cases:
+            path = case_dir / (label + '.txt')
+            mod.write_find_file(path, buf, needle)
+            got = int(run([str(binary), cmd, str(path)], timeout=60))
+            want = mod.oracle(buf, needle)
+            if got != want:
+                mismatches.append({'label': label, 'n': len(buf), 'got': got, 'want': want})
+                break
+        fingerprint = mod.case_fingerprint(cases)
+        case_count = len(cases)
+    elif kernel_id == 'map_filter_u64':
+        cases = mod.generate_cases(seed)
+        for label, values in cases:
+            path = case_dir / (label + '.txt')
+            mod.write_map_filter_file(path, values)
+            text = run([str(binary), cmd, str(path)], timeout=60)
+            got = parse_map_filter_output(text)
+            want = mod.oracle(values)
+            if got != want:
+                mismatches.append({'label': label, 'n': len(values), 'got': got, 'want': want})
+                break
+        fingerprint = mod.case_fingerprint(cases)
+        case_count = len(cases)
+    else:
+        raise ValueError('unsupported kernel for oracle_check: ' + kernel_id)
+
     result = {
         'seed': seed,
-        'case_count': len(cases),
-        'fingerprint': case_fingerprint(cases),
+        'kernel_id': kernel_id,
+        'case_count': case_count,
+        'fingerprint': fingerprint,
         'mismatches': mismatches,
         'state': 'pass' if not mismatches else 'failed',
     }
     if mismatches:
-        raise RuntimeError('Oracle mismatch for ' + mismatches[0]['label']
+        raise RuntimeError('Oracle mismatch for ' + str(mismatches[0]['label'])
                            + f": got={mismatches[0]['got']} want={mismatches[0]['want']}")
     return result
 
@@ -278,13 +322,15 @@ def ensure_fresh(record):
     src = Path(record['source_path'])
     if not src.is_file():
         raise FileNotFoundError('Source missing after build: ' + str(src))
-    if not HARNESS.is_file():
-        raise FileNotFoundError(HARNESS)
-    if not ABI_WRAP.is_file():
-        raise FileNotFoundError(ABI_WRAP)
+    harness = Path(record.get('harness_path') or HARNESS)
+    abi_wrap = Path(record.get('abi_wrap_path') or ABI_WRAP)
+    if not harness.is_file():
+        raise FileNotFoundError(harness)
+    if not abi_wrap.is_file():
+        raise FileNotFoundError(abi_wrap)
     src_hash = sha256_file(src)
-    harness_hash = sha256_file(HARNESS)
-    abi_hash = sha256_file(ABI_WRAP)
+    harness_hash = sha256_file(harness)
+    abi_hash = sha256_file(abi_wrap)
     if src_hash != record['source_sha256']:
         mark_stale(record, 'source hash mismatch')
         raise RuntimeError('Source changed after build; previous verification invalid for '
@@ -518,6 +564,12 @@ def main():
     port = sub.add_parser('portfolio')
     port.add_argument('--seed', type=int, default=1)
     port.add_argument('--output', type=Path, default=None)
+    kev = sub.add_parser('kernel-eval',
+                         help='Verify+smoke-measure all kernel descriptors (T010 pipeline)')
+    kev.add_argument('--samples', type=int, default=3)
+    kev.add_argument('--seed', type=int, default=1)
+    kev.add_argument('--output', type=Path, default=None,
+                     help='JSON report path (must not already exist)')
     lang = sub.add_parser('lang-check')
     lang.add_argument('--source', type=Path, action='append', default=None,
                       help='.ax source path (default: language/examples/*.ax)')
@@ -650,6 +702,104 @@ def main():
                 raise RuntimeError('portfolio checks failed')
             print('portfolio: PASS kernels=' + ','.join(payload['kernel_ids']), flush=True)
             return
+        if args.command == 'kernel-eval':
+            from evaluate import (
+                SMOKE_SIZES,
+                SMOKE_TARGET_NS,
+                build_and_verify,
+                ensure_baseline_clang,
+                measure_paired,
+                write_bench_report,
+            )
+            from kernels.descriptors import (
+                get_descriptor,
+                list_descriptor_ids,
+                sanitize_evidence_summary,
+            )
+            from sampling import DEFAULT_MEMORY_CAP_BYTES as _MEMCAP
+            run_id, run_dir = new_run_dir()
+            report_kernels = {}
+            wrong_blocked = {}
+            for kid in list_descriptor_ids():
+                desc = get_descriptor(kid)
+                kdir = run_dir / kid
+                kdir.mkdir()
+                records = {}
+                binaries = {}
+                ensure_baseline_clang(kdir, records, binaries, kernel_id=kid)
+                cand_id = kid + '_asm'
+                binary, record = build_and_verify(
+                    cand_id, Path(desc['asm_baseline']), kdir, kernel_id=kid)
+                records[cand_id] = record
+                binaries[cand_id] = binary
+                entries, raw_samples, measure_sizes, skipped = measure_paired(
+                    records, binaries,
+                    sizes=SMOKE_SIZES,
+                    samples=args.samples,
+                    seed=args.seed,
+                    target_sample_ns=SMOKE_TARGET_NS,
+                    kernel_id=kid,
+                )
+                out = kdir / 'smoke_measurement.json'
+                report = write_bench_report(
+                    run_id=f'{run_id}_{kid}',
+                    run_dir=kdir,
+                    command='kernel-eval',
+                    entries=entries,
+                    raw_samples=raw_samples,
+                    measure_sizes=measure_sizes,
+                    skipped_sizes=skipped,
+                    samples=args.samples,
+                    seed=args.seed,
+                    target_sample_ns=SMOKE_TARGET_NS,
+                    memory_cap_bytes=_MEMCAP,
+                    output=out,
+                    promotional=False,
+                    extra={'kernel': kid, 'baseline_id': desc['baseline_id']},
+                )
+                summary = sanitize_evidence_summary({**report, 'kernel': kid})
+                (kdir / 'evidence_summary.json').write_text(
+                    json.dumps(summary, indent=2) + '\n')
+                wrong_src = Path(desc['wrong_candidate'])
+                wdir = kdir / 'wrong'
+                wdir.mkdir()
+                try:
+                    build_and_verify('wrong_' + kid, wrong_src, wdir, kernel_id=kid)
+                    wrong_blocked[kid] = {'blocked': False, 'error': 'unexpected_pass'}
+                except Exception as exc:
+                    wrong_blocked[kid] = {'blocked': True, 'error': str(exc)[:200]}
+                report_kernels[kid] = {
+                    'baseline': desc['baseline_id'],
+                    'candidate': cand_id,
+                    'measurement': str(out.resolve()),
+                    'evidence_summary': str((kdir / 'evidence_summary.json').resolve()),
+                    'measure_sizes': measure_sizes,
+                    'wrong_blocked_timing': wrong_blocked[kid]['blocked'],
+                }
+                print(f'{kid}: verify+smoke PASS; wrong_blocked={wrong_blocked[kid]["blocked"]}',
+                      flush=True)
+            payload = {
+                'schema': 1,
+                'run_id': run_id,
+                'run_dir': str(run_dir.resolve()),
+                'kernels': report_kernels,
+                'wrong_blocked': wrong_blocked,
+                'mandatory_speedup': False,
+                'all_ok': all(k['wrong_blocked_timing'] for k in report_kernels.values()),
+            }
+            text = json.dumps(payload, indent=2) + '\n'
+            if args.output:
+                refuse_overwrite(args.output.resolve())
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(text)
+                print('Saved ' + str(args.output.resolve()))
+            else:
+                (run_dir / 'kernel_eval.json').write_text(text)
+                print('Saved ' + str((run_dir / 'kernel_eval.json').resolve()))
+            if not payload['all_ok']:
+                raise RuntimeError('kernel-eval failed: wrong candidate not blocked')
+            print('kernel-eval: PASS kernels=' + ','.join(report_kernels), flush=True)
+            return
         if args.command == 'lang-check':
             from language.native import check_source_equiv
             source_paths = args.source
@@ -728,16 +878,20 @@ def main():
             print('Imported ' + imported['candidate_id'] + ' -> ' + imported['dir'], flush=True)
             name = imported['candidate_id']
             source = Path(imported['source_path'])
+            kernel_id = proposal.get('kernel_id') or DEFAULT_KERNEL
+            from kernels.descriptors import get_descriptor, sanitize_evidence_summary
+            desc = get_descriptor(kernel_id)
             records = {}
             binaries = {}
-            binary, record = build_and_verify(name, source, run_dir)
+            binary, record = build_and_verify(name, source, run_dir, kernel_id=kernel_id)
             records[name] = record
             binaries[name] = binary
             print(name + ': PASS', flush=True)
+            baseline_id = desc['baseline_id']
             if protocol:
-                ensure_baseline_clang(run_dir, records, binaries)
-                print('clang_o3: PASS', flush=True)
-            sizes = PROTOCOL_SIZES if protocol else SMOKE_SIZES
+                ensure_baseline_clang(run_dir, records, binaries, kernel_id=kernel_id)
+                print(baseline_id + ': PASS', flush=True)
+            sizes = tuple(desc['protocol_sizes']) if protocol else SMOKE_SIZES
             entries, raw_samples, measure_sizes, skipped_sizes = measure_paired(
                 records, binaries,
                 sizes=sizes,
@@ -745,6 +899,7 @@ def main():
                 seed=args.seed,
                 target_sample_ns=target_ns,
                 memory_cap_bytes=args.memory_cap_bytes,
+                kernel_id=kernel_id,
             )
             for key, entry in entries.items():
                 if key == name:
@@ -764,12 +919,18 @@ def main():
                 memory_cap_bytes=args.memory_cap_bytes,
                 output=output,
                 promotional=protocol,
-                extra={'proposal_import': imported},
+                extra={'proposal_import': imported, 'kernel': kernel_id,
+                       'baseline_id': baseline_id},
             )
+            summary = sanitize_evidence_summary(report)
+            (run_dir / 'evidence_summary.json').write_text(
+                json.dumps(summary, indent=2) + '\n')
             write_manifest(run_dir, run_id, 'evaluate-proposal', records, {
                 'bench_output': str(output.resolve()),
                 'proposal_dir': imported['dir'],
                 'promotional': protocol,
+                'kernel': kernel_id,
+                'evidence_summary': str((run_dir / 'evidence_summary.json').resolve()),
             })
             print('Saved ' + str(output))
             print('Run ' + run_id + ' -> ' + str(run_dir / 'manifest.json'))

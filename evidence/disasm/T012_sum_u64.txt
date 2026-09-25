@@ -1,4 +1,4 @@
-build/t012_disasm/sum_u64.o:
+/var/folders/lc/29ch4dx958db8_bg9149szl00000gn/T/tmprbcr5ln1/t.o:
 (__TEXT,__text) section
 _sum_array:
 0000000000000000	mov	x2, #0x0

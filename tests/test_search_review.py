@@ -27,10 +27,15 @@ class SearchReviewTests(unittest.TestCase):
                 seed=1, target_sample_ns=20000000, memory_cap_bytes=123456789,
                 output=output)
             return {'returncode': 0, 'stdout': '', 'stderr': ''}
+        times = {'n': 0}
+        def mono():
+            times['n'] += 1
+            # First call is started; all later calls report +25s elapsed so rem2==65.
+            return 100.0 if times['n'] == 1 else 125.0
         with tempfile.TemporaryDirectory() as tmp, \
                 patch('search._spawn_evaluate', side_effect=spawn), \
                 patch('lab.clang_identity', return_value='clang'), \
-                patch('search.time.monotonic', side_effect=[100, 125]):
+                patch('search.time.monotonic', side_effect=mono):
             result = native_evaluate_attempt(ROOT, Path(tmp), mock_propose(ROOT), 0,
                 state={'budgets': {'max_seconds': 100}, 'active_eval_seconds': 10},
                 memory_cap_bytes=123456789)

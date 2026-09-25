@@ -64,11 +64,26 @@ def paired_schedule(variants: Sequence[str], sizes: Sequence[int],
     return schedule
 
 
+def cpu_brand() -> str:
+    """Concrete CPU identity for session/resume fingerprints (macOS sysctl when available)."""
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ['sysctl', '-n', 'machdep.cpu.brand_string'],
+            text=True, stderr=subprocess.DEVNULL).strip()
+        if out:
+            return out
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return platform.processor() or platform.machine() or 'unknown'
+
+
 def host_notes(extra: str | None = None) -> Dict:
     notes = {
         'platform': platform.platform(),
         'machine': platform.machine(),
         'processor': platform.processor(),
+        'cpu_brand': cpu_brand(),
         'python': platform.python_version(),
         'env_AXIOM_HOST_NOTES': os.environ.get('AXIOM_HOST_NOTES'),
     }

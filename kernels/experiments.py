@@ -43,13 +43,43 @@ def dependency_notes() -> Dict[str, Any]:
     }
 
 
+def controlled_paired_smoke_protocol() -> Dict[str, Any]:
+    """Document the controlled experiment used for multi-kernel pipeline checks.
+
+    Assumptions are explicit: same host session, same sizes/samples/seed family,
+    paired schedule, verified binaries only. This is not a speed claim.
+    """
+    return {
+        'experiment_id': 'controlled_paired_smoke',
+        'kind': 'controlled_measurement_protocol',
+        'controls': [
+            'Identical measure sizes and sample counts for baseline and candidate.',
+            'Paired randomized schedule (sampling.paired_schedule) with fixed seed.',
+            'Verification + oracle must pass before calibrate/bench-raw.',
+            'Memory cap applied via array_bytes_for_kernel (map_filter counts in+out).',
+        ],
+        'assumptions': [
+            'Host thermal/power state is not actively controlled; treat single-session '
+            'smoke medians as observational, not promotional.',
+            'find_u8 bench needle is fixed at 0x5A with a guaranteed mid-buffer hit.',
+            'Cache-mode labels remain footprint heuristics, not counter-derived LLC stats.',
+        ],
+        'observation_vs_inference': (
+            'Raw samples and medians are observations; any explanation of why one '
+            'kernel is faster is inference and must be labeled as such.'
+        ),
+        'speedup_required': False,
+    }
+
+
 def build_experiment_report(sizes: List[int] | None = None) -> Dict[str, Any]:
     if sizes is None:
         sizes = [0, 16, 1024, 65536, 1048576]
     return {
-        'schema': 1,
+        'schema': 2,
         'mandatory_speedup': False,
         'cache': cache_footprint_experiment(sizes),
         'dependencies': dependency_notes(),
+        'controlled_protocol': controlled_paired_smoke_protocol(),
         'note': 'Reports separate observation from inferred explanation per T010.',
     }

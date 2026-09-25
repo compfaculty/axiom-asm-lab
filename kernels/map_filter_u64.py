@@ -49,6 +49,14 @@ def generate_cases(seed: int) -> List[Case]:
     return cases
 
 
+def write_map_filter_file(path, values) -> None:
+    from pathlib import Path
+    path = Path(path)
+    lines = [str(len(values))]
+    lines.extend(str(int(v) & MASK) for v in values)
+    path.write_text('\n'.join(lines) + '\n')
+
+
 def case_fingerprint(cases: Sequence[Case]) -> str:
     h = hashlib.sha256()
     for label, values in cases:

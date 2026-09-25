@@ -7,8 +7,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# The proposal evaluator currently has only a sum ABI/harness.
-ALLOWED_KERNELS = {'sum_u64'}
+# Kernels with descriptors + harnesses in the shared evaluate pipeline.
+ALLOWED_KERNELS = {'sum_u64', 'find_u8', 'map_filter_u64'}
 ALLOWED_CONTRACT_VERSIONS = {1}
 REQUIRED_FIELDS = (
     'schema_version',
@@ -50,7 +50,7 @@ def known_parent_hashes(root: Path) -> Dict[str, str]:
     return out
 
 
-def review_assembly_source(source: str) -> None:
+def review_assembly_source(source: str, kernel_id: str = 'sum_u64') -> None:
     if not isinstance(source, str):
         raise ProposalError('source must be a string')
     raw = source.encode('utf-8')
@@ -61,8 +61,13 @@ def review_assembly_source(source: str) -> None:
     for pattern, reason in FORBIDDEN_SOURCE_PATTERNS:
         if pattern.search(source):
             raise ProposalError('source review failed: ' + reason)
-    if '_sum_array' not in source:
-        raise ProposalError('source review failed: missing _sum_array symbol')
+    from kernels.descriptors import get_descriptor
+    try:
+        sym = get_descriptor(kernel_id)['asm_symbol']
+    except KeyError as exc:
+        raise ProposalError('unknown kernel_id: ' + str(kernel_id)) from exc
+    if sym not in source:
+        raise ProposalError(f'source review failed: missing {sym} symbol')
     # Reject non-text / embedded-looking payloads.
     if '\x00' in source:
         raise ProposalError('source review failed: embedded NUL / binary content')
@@ -99,7 +104,7 @@ def validate_proposal(obj: Any, root: Path) -> Dict[str, Any]:
             raise ProposalError('invalid parent: sha256 not a known builtin assembly source')
     if not isinstance(obj['hypothesis'], str) or not obj['hypothesis'].strip():
         raise ProposalError('hypothesis must be a non-empty string')
-    review_assembly_source(obj['source'])
+    review_assembly_source(obj['source'], obj['kernel_id'])
     esr = obj['expected_size_range']
     if not (isinstance(esr, list) and len(esr) == 2
             and all(isinstance(x, int) and x >= 0 for x in esr) and esr[0] <= esr[1]):

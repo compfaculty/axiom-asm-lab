@@ -1,4 +1,4 @@
-build/t012_disasm/find_u8.o:
+/var/folders/lc/29ch4dx958db8_bg9149szl00000gn/T/tmpsyy3lero/t.o:
 (__TEXT,__text) section
 _find_u8:
 0000000000000000	mov	x3, #0x0

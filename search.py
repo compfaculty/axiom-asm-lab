@@ -1,9 +1,15 @@
 """Bounded offline search with ranking, confirmation, and recoverable state.
 
 Time budget counts active evaluation seconds only (not idle gaps between resumes).
+
+Incumbent replacement policy: a challenger may replace ``accepted`` only when it
+has a documented promotion vs Clang *and* its aggregate score strictly exceeds the
+incumbent's score. Independently beating Clang is not proof of beating the
+incumbent.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import hashlib
 import inspect
@@ -15,7 +21,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional, Protocol, TextIO
 
 from analysis import (
     classify_promotion,
@@ -25,12 +31,25 @@ from analysis import (
     validate_report,
 )
 from evaluate import (
+    NORMALIZED_COMPILE_FLAGS,
     PROTOCOL_SIZES,
     SMOKE_TARGET_NS,
     evaluation_config,
 )
 from proposals import ProposalError, import_proposal, mock_propose, sha256_text, validate_proposal
-from sampling import DEFAULT_MEMORY_CAP_BYTES, TARGET_SAMPLE_NS
+from sampling import DEFAULT_MEMORY_CAP_BYTES, TARGET_SAMPLE_NS, cpu_brand
+
+
+# Conservative charge applied when an in-flight attempt dies without a finer checkpoint.
+CONSERVATIVE_INTERRUPT_CHARGE_SECONDS = 1.0
+
+INCUMBENT_POLICY = {
+    'rule': 'challenger_score_must_strictly_exceed_incumbent',
+    'note': (
+        'Promotion vs clang_o3 is necessary but not sufficient to replace an '
+        'accepted incumbent; aggregate bootstrap score must be strictly higher.'
+    ),
+}
 
 
 @dataclass
@@ -121,6 +140,70 @@ def get_provider(mode: str = 'catalog') -> Provider:
     raise RuntimeError('unknown provider mode: ' + mode)
 
 
+def host_session_identity() -> Dict[str, Any]:
+    """Concrete CPU + normalized compiler config for resume/session fingerprints."""
+    try:
+        import lab as L
+        clang = L.clang_identity()
+    except Exception:
+        clang = None
+    return {
+        'cpu_brand': cpu_brand(),
+        'machine': os.uname().machine if hasattr(os, 'uname') else None,
+        'clang': clang,
+        'compiler_config': {
+            'baseline_flags': list(NORMALIZED_COMPILE_FLAGS),
+            'candidate_flags': list(NORMALIZED_COMPILE_FLAGS),
+        },
+    }
+
+
+def beats_incumbent(incumbent: Dict[str, Any], challenger: Dict[str, Any]) -> bool:
+    """Return True if challenger may replace incumbent under INCUMBENT_POLICY."""
+    if not incumbent:
+        return True
+    try:
+        inc_score = float(incumbent.get('score'))
+        ch_score = float(challenger.get('score'))
+    except (TypeError, ValueError):
+        return False
+    return ch_score > inc_score
+
+
+class SearchDirLock:
+    """Exclusive lock so two controllers cannot write one search_state.json."""
+
+    def __init__(self, search_dir: Path):
+        self.search_dir = Path(search_dir)
+        self.lock_path = self.search_dir / '.search.lock'
+        self._fh: Optional[TextIO] = None
+
+    def __enter__(self) -> 'SearchDirLock':
+        self.search_dir.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.lock_path, 'a+', encoding='utf-8')
+        try:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            self._fh.close()
+            self._fh = None
+            raise RuntimeError(
+                'search directory locked by another controller: ' + str(self.search_dir)
+            ) from exc
+        self._fh.seek(0)
+        self._fh.truncate()
+        self._fh.write(f'pid={os.getpid()}\n')
+        self._fh.flush()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._fh is not None:
+            try:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._fh.close()
+                self._fh = None
+
+
 def atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + '.tmp')
@@ -132,6 +215,61 @@ def load_search_state(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text())
 
 
+def validate_measurement_evidence(report_path: Path, *, expect_samples: bool = True) -> Dict[str, Any]:
+    """Authenticate an on-disk measurement report before reusing rankings."""
+    report_path = Path(report_path)
+    if not report_path.is_file():
+        raise ValueError('missing measurement report: ' + str(report_path))
+    report = json.loads(report_path.read_text())
+    if report.get('schema') != 2:
+        raise ValueError('unsupported measurement schema')
+    if not report.get('run_id'):
+        raise ValueError('measurement missing run_id')
+    variants = report.get('variants') or {}
+    if not variants:
+        raise ValueError('measurement missing variants')
+    for name, var in variants.items():
+        for key in ('source_sha256', 'harness_sha256', 'abi_wrap_sha256', 'binary_sha256'):
+            val = var.get(key)
+            if not val or not isinstance(val, str):
+                raise ValueError(f'{name} missing {key}')
+        binary = var.get('binary_path')
+        if binary:
+            bpath = Path(binary)
+            if bpath.is_file():
+                digest = hashlib.sha256(bpath.read_bytes()).hexdigest()
+                if digest != var.get('binary_sha256'):
+                    raise ValueError(f'{name} binary hash mismatch')
+    if expect_samples:
+        samples = report.get('samples_jsonl')
+        if not samples or not Path(samples).is_file():
+            # Fall back to sibling samples.jsonl next to the report.
+            sibling = report_path.parent / 'samples.jsonl'
+            if not sibling.is_file():
+                raise ValueError('missing samples.jsonl for measurement')
+    return report
+
+
+def revalidate_persisted_rankings(state: Dict[str, Any]) -> None:
+    """Validate stored measurement files before trusting best_observed / accepted."""
+    for key in ('best_observed', 'accepted'):
+        entry = state.get(key)
+        if not entry or not isinstance(entry, dict):
+            continue
+        paths: List[str] = []
+        if entry.get('report'):
+            paths.append(str(entry['report']))
+        session = entry.get('session') or {}
+        if session.get('report_path'):
+            paths.append(str(session['report_path']))
+        for sk in ('session_a', 'session_b'):
+            sub = entry.get(sk) or {}
+            if sub.get('report_path'):
+                paths.append(str(sub['report_path']))
+        for path in paths:
+            validate_measurement_evidence(Path(path), expect_samples=True)
+
+
 def session_identity_from_report(report: Dict[str, Any], baseline: str,
                                  candidate: str) -> Dict[str, Any]:
     b = report['variants'][baseline]
@@ -139,7 +277,12 @@ def session_identity_from_report(report: Dict[str, Any], baseline: str,
     return {
         'host': report.get('host'),
         'machine': report.get('machine'),
+        'cpu_brand': report.get('cpu_brand') or (report.get('host_notes') or {}).get('cpu_brand'),
         'clang': report.get('clang'),
+        'compiler_config': report.get('compiler_config') or {
+            'baseline_flags': list(NORMALIZED_COMPILE_FLAGS),
+            'candidate_flags': list(NORMALIZED_COMPILE_FLAGS),
+        },
         'baseline_source_sha256': b.get('source_sha256'),
         'candidate_source_sha256': c.get('source_sha256'),
         'harness_sha256': c.get('harness_sha256'),
@@ -207,7 +350,7 @@ class SearchController:
     def _empty_state(self) -> Dict[str, Any]:
         return {
             'resume_identity': self.resume_identity(),
-            'schema': 2,
+            'schema': 3,
             'search_id': self.search_dir.name,
             'budgets': asdict(self.budgets),
             'started_utc': time.time(),
@@ -216,6 +359,9 @@ class SearchController:
             'evaluation_config': self.eval_config,
             'time_budget_mode': 'active_evaluation_seconds',
             'active_eval_seconds': 0.0,
+            'next_proposal_index': 0,
+            'in_flight': None,
+            'incumbent_policy': dict(INCUMBENT_POLICY),
             'attempts': [],
             'completed_source_sha256': [],
             'consecutive_no_improve': 0,
@@ -228,17 +374,48 @@ class SearchController:
     def save(self, state: Dict[str, Any]) -> None:
         atomic_write_json(self.state_path, state)
 
+    def checkpoint_in_flight(self, state: Dict[str, Any], *, attempt_id: str,
+                             proposal_index: int, stage: str,
+                             source_sha256: Optional[str] = None,
+                             candidate_id: Optional[str] = None,
+                             charged_seconds: float = 0.0) -> None:
+        """Persist mid-evaluation progress for crash recovery / conservative charging."""
+        prev = state.get('in_flight') or {}
+        started_wall = prev.get('started_wall') or time.time()
+        state['in_flight'] = {
+            'attempt_id': attempt_id,
+            'proposal_index': proposal_index,
+            'stage': stage,
+            'source_sha256': source_sha256,
+            'candidate_id': candidate_id,
+            'started_wall': started_wall,
+            'charged_seconds': float(charged_seconds),
+            'updated_wall': time.time(),
+        }
+        self.save(state)
+
+    def clear_in_flight(self, state: Dict[str, Any]) -> None:
+        state['in_flight'] = None
+
     def load_or_init(self, resume: bool) -> Dict[str, Any]:
         if resume:
             if not self.state_path.is_file():
                 raise FileNotFoundError('no search_state.json to resume: ' + str(self.state_path))
             state = load_search_state(self.state_path)
             self._validate_resume_config(state)
+            try:
+                revalidate_persisted_rankings(state)
+            except (OSError, ValueError, KeyError, json.JSONDecodeError, TypeError) as exc:
+                raise RuntimeError(
+                    'persisted ranking failed evidence revalidation: ' + str(exc)
+                ) from exc
             state['budgets'] = asdict(self.budgets)
             if state.get('status') in ('running', 'resuming', 'stopped'):
                 state['status'] = 'resuming'
             return state
-        if self.search_dir.exists() and any(self.search_dir.iterdir()):
+        if self.search_dir.exists() and any(
+                p.name not in ('.search.lock',) for p in self.search_dir.iterdir()):
+            # Allow empty dir that only has a stale lock file from a dead process.
             raise FileExistsError('search dir not empty; pass --resume or new dir')
         self.search_dir.mkdir(parents=True, exist_ok=True)
         state = self._empty_state()
@@ -246,19 +423,28 @@ class SearchController:
         return state
 
     def resume_identity(self):
-        """Reject reuse when evaluator, contracts, harness or catalog changed."""
+        """Reject reuse when evaluator, contracts, harness, catalog or host/compiler changed."""
         paths = sorted({p for pattern in ('*.py', 'kernels/*.py', 'src/*', 'asm/*.s')
                         for p in self.root.glob(pattern) if p.is_file()})
-        return {str(p.relative_to(self.root)): hashlib.sha256(p.read_bytes()).hexdigest()
-                for p in paths}
+        artifacts = {str(p.relative_to(self.root)): hashlib.sha256(p.read_bytes()).hexdigest()
+                     for p in paths}
+        return {
+            'artifacts': artifacts,
+            'host': host_session_identity(),
+        }
 
     def _validate_resume_config(self, state: Dict[str, Any]) -> None:
-        if state.get('resume_identity') != self.resume_identity():
+        expected = self.resume_identity()
+        prev_identity = state.get('resume_identity')
+        # Legacy flat sha maps are rejected: require host+artifact schema.
+        if not isinstance(prev_identity, dict) or 'artifacts' not in prev_identity:
+            raise RuntimeError('resume artifact identity changed or missing; start a new search directory')
+        if prev_identity != expected:
             raise RuntimeError('resume artifact identity changed or missing; start a new search directory')
         prev = state.get('evaluation_config') or {}
         cur = self.eval_config
         for key in ('protocol', 'sizes', 'samples_per_size', 'target_sample_ns',
-                    'memory_cap_bytes', 'kernel', 'seed'):
+                    'memory_cap_bytes', 'kernel', 'seed', 'cpu_brand', 'compiler_config'):
             if key in prev and prev.get(key) != cur.get(key):
                 raise RuntimeError(
                     f'resume evaluation_config mismatch on {key}: '
@@ -275,30 +461,79 @@ class SearchController:
         'proposed', 'built', 'verified', 'confirming',
     })
 
-    def reconcile_incomplete_attempts(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Mark interrupted mid-stage attempts failed; never treat them as completed.
+    def _charge_interrupted(self, state: Dict[str, Any], detail: Dict[str, Any]) -> None:
+        charged = detail.get('charged_seconds')
+        if charged is None:
+            charged = CONSERVATIVE_INTERRUPT_CHARGE_SECONDS
+        in_flight = state.get('in_flight') or {}
+        if in_flight.get('started_wall'):
+            wall = max(0.0, time.time() - float(in_flight['started_wall']))
+            charged = max(float(charged), min(wall, float(self.budgets.max_seconds)))
+        state['active_eval_seconds'] = float(state.get('active_eval_seconds') or 0) + float(charged)
+        detail['charged_seconds'] = float(charged)
+        detail['charge_policy'] = 'conservative_interrupt'
 
-        Also invalidates completed_source_sha256 entries for those attempts so
-        the same source can be re-evaluated after resume.
+    def reconcile_incomplete_attempts(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Mark interrupted mid-stage attempts failed and retryable; charge lost work.
+
+        Retryable failures keep their proposal_index so the catalog entry is retried
+        instead of silently skipped.
         """
         done = set(state.get('completed_source_sha256') or [])
         changed = False
+        retry_indices: List[int] = []
         for attempt in state.get('attempts') or []:
             stage = attempt.get('stage')
             if stage in self.INCOMPLETE_STAGES:
                 src = attempt.get('source_sha256')
+                prior = stage
                 attempt['stage'] = 'failed'
                 detail = dict(attempt.get('detail') or {})
-                detail['error'] = 'interrupted_incomplete_stage:' + str(stage)
-                detail['prior_stage'] = stage
+                detail['error'] = 'interrupted_incomplete_stage:' + str(prior)
+                detail['prior_stage'] = prior
                 detail['score'] = None
+                detail['retryable'] = True
+                if 'proposal_index' not in detail and attempt.get('proposal_index') is not None:
+                    detail['proposal_index'] = attempt['proposal_index']
+                if detail.get('proposal_index') is None:
+                    # Fall back to position among attempts when older records omit the field.
+                    detail['proposal_index'] = state['attempts'].index(attempt)
+                attempt['proposal_index'] = detail['proposal_index']
+                self._charge_interrupted(state, detail)
                 attempt['detail'] = detail
+                retry_indices.append(int(detail['proposal_index']))
                 if src in done:
                     done.discard(src)
                 changed = True
+        # In-flight marker without a matching attempt record.
+        in_flight = state.get('in_flight')
+        if in_flight and in_flight.get('attempt_id'):
+            ids = {a.get('attempt_id') for a in (state.get('attempts') or [])}
+            if in_flight['attempt_id'] not in ids:
+                detail = {
+                    'error': 'interrupted_in_flight',
+                    'prior_stage': in_flight.get('stage'),
+                    'retryable': True,
+                    'proposal_index': in_flight.get('proposal_index', 0),
+                    'charged_seconds': in_flight.get('charged_seconds'),
+                }
+                self._charge_interrupted(state, detail)
+                state.setdefault('attempts', []).append({
+                    'attempt_id': in_flight['attempt_id'],
+                    'candidate_id': in_flight.get('candidate_id') or 'in_flight',
+                    'source_sha256': in_flight.get('source_sha256') or (
+                        'in_flight_' + in_flight['attempt_id']),
+                    'stage': 'failed',
+                    'proposal_index': detail['proposal_index'],
+                    'detail': detail,
+                })
+                retry_indices.append(int(detail['proposal_index']))
+                changed = True
+            state['in_flight'] = None
+            changed = True
         # Orphan attempt dirs left by a crash before state append are incomplete
-        # evidence and must not be treated as finished work. Record separately so
-        # catalog/proposal index alignment is preserved.
+        # evidence. Charge time but do not treat them as catalog skip or retry
+        # targets — in_flight / incomplete attempts own the proposal_index.
         attempts_root = self.search_dir / 'attempts'
         recorded_ids = {a.get('attempt_id') for a in (state.get('attempts') or [])}
         orphans = list(state.get('orphaned_attempts') or [])
@@ -314,6 +549,7 @@ class SearchController:
                 marker = path / 'attempt.json'
                 stage = 'proposed'
                 src_hash = None
+                payload: Dict[str, Any] = {}
                 if marker.is_file():
                     try:
                         payload = json.loads(marker.read_text())
@@ -323,17 +559,20 @@ class SearchController:
                             src_hash = payload['detail'].get('source_sha256')
                     except (OSError, json.JSONDecodeError, TypeError):
                         pass
+                detail = {
+                    'error': 'orphan_incomplete_attempt_dir',
+                    'prior_stage': stage,
+                    'path': str(path),
+                    'score': None,
+                    'retryable': False,
+                }
+                self._charge_interrupted(state, detail)
                 orphan = {
                     'attempt_id': aid,
                     'candidate_id': payload_candidate(path),
                     'source_sha256': src_hash or ('orphan_' + aid),
                     'stage': 'failed',
-                    'detail': {
-                        'error': 'orphan_incomplete_attempt_dir',
-                        'prior_stage': stage,
-                        'path': str(path),
-                        'score': None,
-                    },
+                    'detail': detail,
                 }
                 orphans.append(orphan)
                 if src_hash and src_hash in done:
@@ -342,10 +581,36 @@ class SearchController:
                 atomic_write_json(path / 'attempt.json', orphan)
         state['orphaned_attempts'] = orphans
         state['completed_source_sha256'] = sorted(done)
+        if retry_indices:
+            # Retry the earliest interrupted catalog entry; do not skip ahead.
+            state['next_proposal_index'] = min(retry_indices)
+            changed = True
         if changed:
             state['status'] = 'resuming'
             self.save(state)
         return state
+
+    def next_proposal_index(self, state: Dict[str, Any]) -> int:
+        """Return catalog/proposal index, preferring retryable interrupted entries."""
+        for attempt in state.get('attempts') or []:
+            detail = attempt.get('detail') or {}
+            if attempt.get('stage') == 'failed' and detail.get('retryable'):
+                idx = detail.get('proposal_index', attempt.get('proposal_index'))
+                if idx is not None:
+                    return int(idx)
+        if 'next_proposal_index' in state:
+            return int(state['next_proposal_index'])
+        return len(state.get('attempts') or [])
+
+    def _mark_retry_consumed(self, state: Dict[str, Any], proposal_index: int,
+                             new_attempt_id: str) -> None:
+        for attempt in state.get('attempts') or []:
+            detail = attempt.get('detail') or {}
+            if (attempt.get('stage') == 'failed' and detail.get('retryable')
+                    and int(detail.get('proposal_index', -1)) == proposal_index):
+                detail['retryable'] = False
+                detail['superseded_by'] = new_attempt_id
+                attempt['detail'] = detail
 
     def stop_reason(self, state: Dict[str, Any]) -> Optional[str]:
         if len(state['attempts']) >= self.budgets.max_proposals:
@@ -357,16 +622,21 @@ class SearchController:
         return None
 
     def run(self, resume: bool = False) -> Dict[str, Any]:
+        with SearchDirLock(self.search_dir):
+            return self._run_locked(resume=resume)
+
+    def _run_locked(self, resume: bool = False) -> Dict[str, Any]:
         state = self.load_or_init(resume)
         if resume:
             state = self.reconcile_incomplete_attempts(state)
         state['wall_started'] = state.get('wall_started') or time.time()
         state['status'] = 'running'
         state.setdefault('active_eval_seconds', 0.0)
+        state.setdefault('next_proposal_index', self.next_proposal_index(state))
+        state.setdefault('incumbent_policy', dict(INCUMBENT_POLICY))
         self.save(state)
 
         done_hashes = set(state.get('completed_source_sha256') or [])
-        index = len(state['attempts'])
         while True:
             reason = self.stop_reason(state)
             if reason:
@@ -375,6 +645,7 @@ class SearchController:
                 self.save(state)
                 return state
 
+            index = self.next_proposal_index(state)
             try:
                 proposal = self.provider.propose(index, self.root)
             except StopIteration:
@@ -390,12 +661,14 @@ class SearchController:
                     candidate_id=str(proposal.get('candidate_id')) if isinstance(proposal, dict) else '<invalid>',
                     source_sha256=sha256_text(repr(proposal)),
                     stage='failed',
-                    detail={'error': str(exc), 'phase': 'validate'},
+                    detail={'error': str(exc), 'phase': 'validate',
+                            'proposal_index': index, 'retryable': False},
                 )
+                self._mark_retry_consumed(state, index, attempt.attempt_id)
                 state['attempts'].append(asdict(attempt))
                 state['consecutive_no_improve'] += 1
+                state['next_proposal_index'] = index + 1
                 self.save(state)
-                index += 1
                 continue
 
             src_hash = sha256_text(proposal['source'])
@@ -405,27 +678,56 @@ class SearchController:
                     candidate_id=proposal['candidate_id'],
                     source_sha256=src_hash,
                     stage='skipped',
-                    detail={'reason': 'duplicate_source_hash'},
+                    detail={'reason': 'duplicate_source_hash',
+                            'proposal_index': index, 'retryable': False},
                 )
+                self._mark_retry_consumed(state, index, attempt.attempt_id)
                 state['attempts'].append(asdict(attempt))
                 state['consecutive_no_improve'] += 1
+                state['next_proposal_index'] = index + 1
                 self.save(state)
-                index += 1
                 continue
 
+            attempt_id = uuid.uuid4().hex[:12]
+            self.checkpoint_in_flight(
+                state, attempt_id=attempt_id, proposal_index=index, stage='proposed',
+                source_sha256=src_hash, candidate_id=proposal.get('candidate_id'),
+                charged_seconds=0.0)
             t0 = time.monotonic()
             attempt = self._call_evaluate(proposal, index, state)
             elapsed = time.monotonic() - t0
-            state['active_eval_seconds'] = float(state.get('active_eval_seconds') or 0) + elapsed
-            state['attempts'].append(asdict(attempt))
+            # Prefer evaluator-reported charge if present; else wall elapsed.
+            detail = attempt.detail or {}
+            charged = detail.get('eval_elapsed_seconds')
+            if charged is None:
+                charged = elapsed
+            state['active_eval_seconds'] = float(state.get('active_eval_seconds') or 0) + float(charged)
+            detail['proposal_index'] = index
+            detail.setdefault('retryable', False)
+            attempt.detail = detail
+            rec = asdict(attempt)
+            rec['proposal_index'] = index
+            self._mark_retry_consumed(state, index, attempt.attempt_id)
+            state['attempts'].append(rec)
+            self.clear_in_flight(state)
             # Only completed evaluation stages consume the source hash.
             if attempt.stage not in self.INCOMPLETE_STAGES:
                 done_hashes.add(src_hash)
+                state['next_proposal_index'] = index + 1
+            else:
+                # Incomplete return: keep proposal_index for retry.
+                detail['retryable'] = True
+                attempt.detail = detail
+                state['attempts'][-1] = asdict(attempt)
+                state['attempts'][-1]['proposal_index'] = index
+                state['next_proposal_index'] = index
             state['completed_source_sha256'] = sorted(done_hashes)
 
             self._update_ranking(state, attempt)
+            # Reflect possible stage downgrade from incumbent policy.
+            state['attempts'][-1] = asdict(attempt)
+            state['attempts'][-1]['proposal_index'] = index
             self.save(state)
-            index += 1
 
         return state
 
@@ -473,7 +775,17 @@ class SearchController:
             state['consecutive_no_improve'] += 1
 
         if detail.get('accepted'):
-            state['accepted'] = detail['accepted']
+            challenger = detail['accepted']
+            incumbent = state.get('accepted')
+            if incumbent and not beats_incumbent(incumbent, challenger):
+                detail['rejection_reason'] = (
+                    'incumbent_policy: challenger does not beat incumbent score')
+                detail['incumbent_policy'] = dict(INCUMBENT_POLICY)
+                detail.pop('accepted', None)
+                attempt.stage = 'rejected'
+                attempt.detail = detail
+            else:
+                state['accepted'] = challenger
 
         attempt.detail['improved'] = improved
 
@@ -618,7 +930,10 @@ def native_evaluate_attempt(root, search_dir, proposal, index, state=None,
                             memory_cap_bytes: int = DEFAULT_MEMORY_CAP_BYTES,
                             confirm: bool = True):
     """Native evaluate with optional ranking and confirmation."""
-    attempt_id = uuid.uuid4().hex[:12]
+    if state is None:
+        state = load_search_state(search_dir / 'search_state.json')
+    in_flight = state.get('in_flight') or {}
+    attempt_id = in_flight.get('attempt_id') or uuid.uuid4().hex[:12]
     dest = search_dir / 'attempts' / f'{index:04d}_{attempt_id}'
     dest.mkdir(parents=True, exist_ok=False)
     proposal_path = dest / 'input.json'
@@ -628,10 +943,9 @@ def native_evaluate_attempt(root, search_dir, proposal, index, state=None,
         'stage': 'proposed',
         'candidate_id': proposal.get('candidate_id'),
         'source_sha256': sha256_text(proposal.get('source', '')),
+        'proposal_index': index,
     })
 
-    if state is None:
-        state = load_search_state(search_dir / 'search_state.json')
     budgets = state.get('budgets') or {}
     max_seconds = float(budgets.get('max_seconds', 1800))
     active = float(state.get('active_eval_seconds') or 0)
@@ -641,10 +955,36 @@ def native_evaluate_attempt(root, search_dir, proposal, index, state=None,
         'improved': False,
         'score': None,
         'smoke': smoke,
+        'proposal_index': index,
     }
     stage = 'failed'
     started = time.monotonic()
     output = dest / 'primary' / 'measurement.json'
+
+    def _checkpoint(stage_name: str) -> None:
+        elapsed = time.monotonic() - started
+        detail['eval_elapsed_seconds'] = elapsed
+        atomic_write_json(dest / 'attempt.json', {
+            'attempt_id': attempt_id,
+            'stage': stage_name,
+            'candidate_id': proposal.get('candidate_id'),
+            'source_sha256': sha256_text(proposal.get('source', '')),
+            'proposal_index': index,
+            'detail': detail,
+        })
+        state['in_flight'] = {
+            'attempt_id': attempt_id,
+            'proposal_index': index,
+            'stage': stage_name,
+            'source_sha256': sha256_text(proposal.get('source', '')),
+            'candidate_id': proposal.get('candidate_id'),
+            'started_wall': (state.get('in_flight') or {}).get('started_wall') or time.time(),
+            'charged_seconds': elapsed,
+            'updated_wall': time.time(),
+        }
+        # Only rewrite full controller state; unit tests may pass a minimal dict.
+        if state.get('schema') is not None and 'attempts' in state:
+            atomic_write_json(search_dir / 'search_state.json', state)
 
     if smoke:
         extra = ['--smoke', '--samples', str(samples), '--seed', str(seed)]
@@ -654,6 +994,7 @@ def native_evaluate_attempt(root, search_dir, proposal, index, state=None,
         extra += ['--memory-cap-bytes', str(memory_cap_bytes)]
 
     try:
+        _checkpoint('proposed')
         spawn = _spawn_evaluate(root, proposal_path, output, remaining, extra)
         (dest / 'stdout.log').write_text(spawn['stdout'] or '')
         (dest / 'stderr.log').write_text(spawn['stderr'] or '')
@@ -671,6 +1012,7 @@ def native_evaluate_attempt(root, search_dir, proposal, index, state=None,
         detail['report'] = str(output)
         detail['lifecycle'] = variant['lifecycle']
         detail['verification'] = variant['verification']
+        _checkpoint('measured')
 
         if smoke or report.get('promotional') is False:
             detail['rejection_reason'] = 'smoke_non_promotional'
@@ -682,14 +1024,11 @@ def native_evaluate_attempt(root, search_dir, proposal, index, state=None,
             detail['session'] = session
             detail['score'] = session.get('score')
             stage = 'ranked'
+            _checkpoint('ranked')
 
             if confirm and session.get('promote_eligible') and not smoke:
                 stage = 'confirming'
-                atomic_write_json(dest / 'attempt.json', {
-                    'attempt_id': attempt_id,
-                    'stage': stage,
-                    'detail': detail,
-                })
+                _checkpoint('confirming')
                 confirm_out = dest / 'confirmation' / 'measurement.json'
                 confirm_seed = seed + 10_000 + index
                 rem2 = max_seconds - active - (time.monotonic() - started)
@@ -735,6 +1074,7 @@ def native_evaluate_attempt(root, search_dir, proposal, index, state=None,
         if stage not in ('ranked', 'accepted', 'rejected', 'measured'):
             stage = 'failed'
 
+    detail['eval_elapsed_seconds'] = time.monotonic() - started
     result = AttemptRecord(
         attempt_id, proposal['candidate_id'],
         sha256_text(proposal['source']), stage, detail=detail)

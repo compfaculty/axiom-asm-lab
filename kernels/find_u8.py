@@ -52,6 +52,14 @@ def generate_cases(seed: int) -> List[Case]:
     return cases
 
 
+def write_find_file(path, haystack, needle: int) -> None:
+    from pathlib import Path
+    path = Path(path)
+    lines = [f'{len(haystack)} {int(needle) & 0xFF}']
+    lines.extend(str(int(b) & 0xFF) for b in haystack)
+    path.write_text('\n'.join(lines) + '\n')
+
+
 def case_fingerprint(cases: Sequence[Case]) -> str:
     h = hashlib.sha256()
     for label, buf, needle in cases:

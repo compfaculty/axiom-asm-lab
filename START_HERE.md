@@ -1,6 +1,6 @@
 # Open this folder in Cursor
 
-**Current status:** review fixes await native validation (T009R). Follow [docs/NEXT_CURSOR_PLAN.md](docs/NEXT_CURSOR_PLAN.md) before expanding the kernel portfolio.
+**Current status:** M006 complete (T009R→T012). Stage 4/M007 deferred per [docs/ADR_STAGE4_DEFER.md](docs/ADR_STAGE4_DEFER.md). Follow [docs/NEXT_CURSOR_PLAN.md](docs/NEXT_CURSOR_PLAN.md) only for residual notes; the gate chain through language revalidation is closed.
 
 Extract the ZIP, then use **Open Folder** on `axiom-asm-lab` (the directory containing this file). The folder includes `.cursor/rules/axiom.mdc`, root `AGENTS.md`, source code, specs, a task ledger, and completion criteria.
 

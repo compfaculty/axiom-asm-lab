@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
@@ -54,9 +56,15 @@ def _call_find(lib: ctypes.CDLL, lowered: Lowered) -> int:
     needle = int(lowered.needle) & 0xFF
     buf = [b & 0xFF for b in lowered.array]
     if not buf:
-        return int(lib.find_u8(None, 0, needle))
+        got = int(lib.find_u8(None, 0, needle))
+        if got != 0:
+            raise RuntimeError(f'find_u8 empty return size invalid: {got}')
+        return got
     arr = (ctypes.c_uint8 * len(buf))(*buf)
-    return int(lib.find_u8(arr, len(buf), needle))
+    got = int(lib.find_u8(arr, len(buf), needle))
+    if got > len(buf):
+        raise RuntimeError(f'find_u8 return index {got} exceeds n={len(buf)}')
+    return got
 
 
 def _call_map_filter(lib: ctypes.CDLL, lowered: Lowered) -> List[int]:
@@ -67,31 +75,82 @@ def _call_map_filter(lib: ctypes.CDLL, lowered: Lowered) -> List[int]:
     vals = [v & MASK for v in lowered.array]
     out_buf = (ctypes.c_uint64 * max(len(vals), 1))()
     if not vals:
-        n = lib.map_filter_u64(None, 0, out_buf)
+        n = int(lib.map_filter_u64(None, 0, out_buf))
+        if n != 0:
+            raise RuntimeError(f'map_filter empty return size invalid: {n}')
         return []
     inn = (ctypes.c_uint64 * len(vals))(*vals)
-    n = lib.map_filter_u64(inn, len(vals), out_buf)
+    n = int(lib.map_filter_u64(inn, len(vals), out_buf))
+    if n < 0 or n > len(vals):
+        raise RuntimeError(f'map_filter return size {n} exceeds input bound {len(vals)}')
     return [int(out_buf[i]) for i in range(n)]
 
 
-def check_source_equiv(source: str) -> Dict[str, Any]:
-    """Parse source, compare interpreter vs native; used by tests and lab CLI."""
+def check_source_equiv(source: str, *, isolate: bool = True) -> Dict[str, Any]:
+    """Parse source, compare interpreter vs native; used by tests and lab CLI.
+
+    When isolate=True (default), native execution runs in a child Python process so a
+    crashing template cannot corrupt the controller address space.
+    """
     from .parser import parse
     prog = parse(source)
     want = interpret(prog)
-    got = run_native(prog)
+    if isolate:
+        got = _native_in_child(source)
+    else:
+        got = run_native(prog)
+    kind = lower(prog).kind.value
     return {
         'ok': got == want,
         'program': prog.name,
-        'kind': lower(prog).kind.value,
+        'kind': kind,
+        'kernel_id': kind,
         'interpreter': want,
         'native': got,
+        'isolated': isolate,
     }
 
 
+def _native_in_child(source: str) -> Any:
+    """Child-process native runner; keeps ctypes load out of the controller process."""
+    with tempfile.TemporaryDirectory() as tmp:
+        src_path = Path(tmp) / 'prog.ax'
+        out_path = Path(tmp) / 'result.json'
+        src_path.write_text(source)
+        helper = Path(tmp) / 'runner.py'
+        helper.write_text(
+            'import json, sys\n'
+            'from pathlib import Path\n'
+            'sys.path.insert(0, sys.argv[1])\n'
+            'from language.parser import parse\n'
+            'from language.native import run_native\n'
+            'src = Path(sys.argv[2]).read_text()\n'
+            'got = run_native(parse(src))\n'
+            'Path(sys.argv[3]).write_text(json.dumps(got) + "\\n")\n'
+        )
+        root = str(Path(__file__).resolve().parents[1])
+        proc = subprocess.run(
+            [sys.executable, str(helper), root, str(src_path), str(out_path)],
+            capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                'isolated native runner failed: '
+                + (proc.stderr or proc.stdout or str(proc.returncode)))
+        return json.loads(out_path.read_text())
+
+
 def disassemble_template(kind: KernelKind) -> str:
+    from kernels.descriptors import get_descriptor
     from .lower import _TEMPLATES
-    template, _ = _TEMPLATES[kind]
-    return subprocess.run(
-        ['otool', '-tV', str(template)],
-        check=True, capture_output=True, text=True).stdout
+    desc = get_descriptor(kind.value)
+    template = Path(desc['asm_baseline'])
+    if not template.is_file():
+        template, _ = _TEMPLATES[kind]
+    with tempfile.TemporaryDirectory() as tmp:
+        obj = Path(tmp) / 't.o'
+        subprocess.run(
+            ['clang', '-c', str(template), '-o', str(obj)],
+            check=True, capture_output=True, text=True)
+        return subprocess.run(
+            ['otool', '-tV', str(obj)],
+            check=True, capture_output=True, text=True).stdout

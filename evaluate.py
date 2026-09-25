@@ -18,10 +18,14 @@ from sampling import (
     MAX_CALIBRATE_ITERS,
     TARGET_SAMPLE_NS,
     cache_mode_label,
+    cpu_brand,
     filter_sizes_for_cap,
     host_notes,
     paired_schedule,
 )
+
+# Normalized compile flags for both Clang baseline and asm candidates (lab.compile_one).
+NORMALIZED_COMPILE_FLAGS = ['-O3', '-std=c11', '-Wall', '-Wextra']
 
 # Full predefined objective (BENCHMARK_PROTOCOL / lab.SIZES).
 PROTOCOL_SIZES = (0, 1, 3, 4, 7, 16, 64, 1024, 65536, 1048576)
@@ -31,14 +35,15 @@ PROTOCOL_MIN_SAMPLES = 30
 
 
 def build_and_verify(name: str, source: Path, run_dir: Path,
-                     capture_disasm: bool = True) -> Tuple[Path, Dict[str, Any]]:
+                     capture_disasm: bool = True,
+                     kernel_id: str = 'sum_u64') -> Tuple[Path, Dict[str, Any]]:
     """Compile, verify, oracle-check; returns (binary, record). Raises on failure."""
     import lab as L
 
-    binary, record = L.compile_one(name, source, run_dir)
+    binary, record = L.compile_one(name, source, run_dir, kernel_id=kernel_id)
     try:
         L.verify_binary(binary, record, run_dir=run_dir)
-        oracle_result = L.oracle_check(binary, run_dir)
+        oracle_result = L.oracle_check(binary, run_dir, kernel_id=kernel_id)
         L.finalize_verified(record, oracle_result)
     except Exception:
         if record.get('lifecycle') != L.LIFECYCLE_FAILED:
@@ -83,6 +88,7 @@ def measure_paired(
         target_sample_ns: int,
         memory_cap_bytes: int = DEFAULT_MEMORY_CAP_BYTES,
         progress: bool = True,
+        kernel_id: str = 'sum_u64',
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[int], List[int]]:
     """Calibrate and collect paired raw samples. No score on failed variants.
 
@@ -90,11 +96,18 @@ def measure_paired(
     Mutates records to lifecycle measured on success.
     """
     import lab as L
+    from kernels.descriptors import array_bytes_for_kernel
 
     if target_sample_ns < 1_000_000:
         raise ValueError('target_sample_ns too small')
-    measure_sizes = filter_sizes_for_cap(list(sizes), memory_cap_bytes)
-    skipped_sizes = [n for n in sizes if n not in measure_sizes]
+    measure_sizes = []
+    skipped_sizes = []
+    for n in sizes:
+        need = array_bytes_for_kernel(kernel_id, int(n))
+        if need > memory_cap_bytes:
+            skipped_sizes.append(int(n))
+        else:
+            measure_sizes.append(int(n))
     if not measure_sizes:
         raise RuntimeError('No sizes remain under memory cap')
 
@@ -199,7 +212,12 @@ def write_bench_report(
         'timestamp_utc': datetime.now(timezone.utc).isoformat(),
         'host': platform.platform(),
         'machine': platform.machine(),
+        'cpu_brand': cpu_brand(),
         'clang': L.clang_identity(),
+        'compiler_config': {
+            'baseline_flags': list(NORMALIZED_COMPILE_FLAGS),
+            'candidate_flags': list(NORMALIZED_COMPILE_FLAGS),
+        },
         'samples_per_size': samples,
         'seed': seed,
         'target_sample_ns': target_sample_ns,
@@ -221,21 +239,26 @@ def write_bench_report(
 
 def ensure_baseline_clang(run_dir: Path,
                           records: Dict[str, Dict[str, Any]],
-                          binaries: Dict[str, Path]) -> None:
-    """Ensure clang_o3 is built and verified alongside candidates for paired scoring."""
-    import lab as L
-
-    if 'clang_o3' in records:
+                          binaries: Dict[str, Path],
+                          kernel_id: str = 'sum_u64') -> None:
+    """Ensure kernel baseline is built and verified alongside candidates for paired scoring."""
+    from kernels.descriptors import get_descriptor
+    desc = get_descriptor(kernel_id)
+    baseline_id = desc['baseline_id']
+    if baseline_id in records:
         return
-    source = L.BUILTIN_SOURCES['clang_o3']
-    binary, record = build_and_verify('clang_o3', source, run_dir)
-    records['clang_o3'] = record
-    binaries['clang_o3'] = binary
+    source = Path(desc['baseline_source'])
+    binary, record = build_and_verify(baseline_id, source, run_dir, kernel_id=kernel_id)
+    records[baseline_id] = record
+    binaries[baseline_id] = binary
 
 
 def evaluation_config(*, protocol: bool, samples: int, seed: int,
-                      target_sample_ns: int, memory_cap_bytes: int) -> Dict[str, Any]:
-    sizes = list(PROTOCOL_SIZES) if protocol else list(SMOKE_SIZES)
+                      target_sample_ns: int, memory_cap_bytes: int,
+                      kernel: str = 'sum_u64') -> Dict[str, Any]:
+    from kernels.descriptors import get_descriptor
+    desc = get_descriptor(kernel)
+    sizes = list(desc['protocol_sizes'] if protocol else (0, 1, 16, 1024))
     return {
         'protocol': protocol,
         'promotional': protocol,
@@ -244,5 +267,11 @@ def evaluation_config(*, protocol: bool, samples: int, seed: int,
         'seed': seed,
         'target_sample_ns': target_sample_ns,
         'memory_cap_bytes': memory_cap_bytes,
-        'kernel': 'sum_u64',
+        'kernel': kernel,
+        'baseline_id': desc['baseline_id'],
+        'cpu_brand': cpu_brand(),
+        'compiler_config': {
+            'baseline_flags': list(NORMALIZED_COMPILE_FLAGS),
+            'candidate_flags': list(NORMALIZED_COMPILE_FLAGS),
+        },
     }
