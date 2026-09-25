@@ -1,6 +1,6 @@
 # Open this folder in Cursor
 
-**Current status:** M004 sum_u64 optimization loop complete (shared evaluate, ranking, confirmation, recoverable catalog search). Next: T010 kernel portfolio. See docs/SESSION_LOG.md and evidence/T009.md.
+**Current status:** review fixes await native validation (T009R). Follow [docs/NEXT_CURSOR_PLAN.md](docs/NEXT_CURSOR_PLAN.md) before expanding the kernel portfolio.
 
 Extract the ZIP, then use **Open Folder** on `axiom-asm-lab` (the directory containing this file). The folder includes `.cursor/rules/axiom.mdc`, root `AGENTS.md`, source code, specs, a task ledger, and completion criteria.
 
@@ -22,7 +22,7 @@ python3 lab.py search --dir build/searches/run1 --provider catalog --max-proposa
 The last four require Apple Silicon macOS. Search without `--smoke` enforces the full measurement protocol (30 pairs, all objective sizes, confirmation when eligible). Time budgets count **active evaluation seconds** only.
 
 ## What is here now
-Two sum assembly fixtures, a C baseline, a basic verifier, a sequential benchmark controller, and a development specification. Existing source is intentionally small. Guard pages, ABI validation, reliable performance promotion, model adapters, hardware exploration, and a language front end remain explicit implementation tasks.
+A shared build/verify/measure pipeline, paired Clang comparisons, catalog scalar/unrolled/NEON variants, search ranking and confirmation, guard-page and ABI checks, and a limited language template prototype. See NEXT_CURSOR_PLAN for concrete recovery/evidence work still outstanding.
 
 ## Document map
 - PROJECT_SPEC: goals, requirements, limits, success definition.

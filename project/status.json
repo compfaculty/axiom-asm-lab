@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "current_milestone": "M005",
+  "current_milestone": "M004",
   "tasks": [
     {
       "id": "T001",
@@ -91,14 +91,34 @@
       "blocker": null
     },
     {
-      "id": "T010",
-      "milestone": "M005",
+      "id": "T009R",
+      "milestone": "M004",
       "depends_on": [
         "T009"
       ],
+      "state": "blocked",
+      "evidence": null,
+      "blocker": "Fixes and portable regressions complete; native validation required per docs/NEXT_CURSOR_PLAN.md."
+    },
+    {
+      "id": "T009H",
+      "milestone": "M004",
+      "depends_on": [
+        "T009R"
+      ],
       "state": "pending",
-      "evidence": "evidence/T010.md",
+      "evidence": null,
       "blocker": null
+    },
+    {
+      "id": "T010",
+      "milestone": "M005",
+      "depends_on": [
+        "T009H"
+      ],
+      "state": "blocked",
+      "evidence": "evidence/T010.md",
+      "blocker": "Depends on review validation and recovery/evidence hardening."
     },
     {
       "id": "T011",
