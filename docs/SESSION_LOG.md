@@ -114,3 +114,10 @@ Append subsequent entries with date, task IDs, changes, commands/results, eviden
 - Evidence: `evidence/T008.md`, `evidence/T009.md`. Status: T008/T009 done; milestone → M005; T010 pending.
 - Next task: T010 — expand kernels and machine experiments.
 - Next command: `python3 lab.py portfolio` (after reading T010 acceptance in docs/IMPLEMENTATION_PLAN.md).
+
+## 2026-09-25 — Search review follow-up
+- Reviewed 0b03584. Fixed confirmation samples.jsonl collision with per-session output directories; confirmation now receives remaining monotonic time and the original memory cap.
+- Evaluator signatures are inspected before invocation: internal TypeError no longer reruns work. Malformed proposal objects are recorded as failed.
+- Resume requires matching source fingerprint and seed; older state files require a new search directory.
+- Tests: 116 discovered, 111 passed, five native checks skipped on Linux; bookkeeping and diff checks passed. No native performance claim.
+- Plan: docs/NEXT_CURSOR_PLAN.md. T009R tracks native validation; T009H tracks remaining recovery/evidence integrity work before T010. Historical native evidence is retained.

@@ -5,6 +5,8 @@ Time budget counts active evaluation seconds only (not idle gaps between resumes
 from __future__ import annotations
 
 import json
+import hashlib
+import inspect
 import os
 import signal
 import subprocess
@@ -204,6 +206,7 @@ class SearchController:
 
     def _empty_state(self) -> Dict[str, Any]:
         return {
+            'resume_identity': self.resume_identity(),
             'schema': 2,
             'search_id': self.search_dir.name,
             'budgets': asdict(self.budgets),
@@ -242,11 +245,20 @@ class SearchController:
         self.save(state)
         return state
 
+    def resume_identity(self):
+        """Reject reuse when evaluator, contracts, harness or catalog changed."""
+        paths = sorted({p for pattern in ('*.py', 'kernels/*.py', 'src/*', 'asm/*.s')
+                        for p in self.root.glob(pattern) if p.is_file()})
+        return {str(p.relative_to(self.root)): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in paths}
+
     def _validate_resume_config(self, state: Dict[str, Any]) -> None:
+        if state.get('resume_identity') != self.resume_identity():
+            raise RuntimeError('resume artifact identity changed or missing; start a new search directory')
         prev = state.get('evaluation_config') or {}
         cur = self.eval_config
         for key in ('protocol', 'sizes', 'samples_per_size', 'target_sample_ns',
-                    'memory_cap_bytes', 'kernel'):
+                    'memory_cap_bytes', 'kernel', 'seed'):
             if key in prev and prev.get(key) != cur.get(key):
                 raise RuntimeError(
                     f'resume evaluation_config mismatch on {key}: '
@@ -372,11 +384,11 @@ class SearchController:
                 return state
             try:
                 validate_proposal(proposal, self.root)
-            except ProposalError as exc:
+            except (ProposalError, TypeError) as exc:
                 attempt = AttemptRecord(
                     attempt_id=uuid.uuid4().hex[:12],
-                    candidate_id=str(proposal.get('candidate_id')),
-                    source_sha256=sha256_text(proposal.get('source', '')),
+                    candidate_id=str(proposal.get('candidate_id')) if isinstance(proposal, dict) else '<invalid>',
+                    source_sha256=sha256_text(repr(proposal)),
                     stage='failed',
                     detail={'error': str(exc), 'phase': 'validate'},
                 )
@@ -401,9 +413,9 @@ class SearchController:
                 index += 1
                 continue
 
-            t0 = time.time()
+            t0 = time.monotonic()
             attempt = self._call_evaluate(proposal, index, state)
-            elapsed = time.time() - t0
+            elapsed = time.monotonic() - t0
             state['active_eval_seconds'] = float(state.get('active_eval_seconds') or 0) + elapsed
             state['attempts'].append(asdict(attempt))
             # Only completed evaluation stages consume the source hash.
@@ -418,11 +430,15 @@ class SearchController:
         return state
 
     def _call_evaluate(self, proposal, index, state):
-        # Support both old (4-arg) and new (5-arg with state) evaluators.
+        # Determine arity before invocation: an internal TypeError must not rerun work.
+        signature = inspect.signature(self.evaluate_fn)
+        args = (self.root, self.search_dir, proposal, index)
         try:
-            return self.evaluate_fn(self.root, self.search_dir, proposal, index, state)
+            signature.bind(*args, state)
         except TypeError:
-            return self.evaluate_fn(self.root, self.search_dir, proposal, index)
+            signature.bind(*args)
+            return self.evaluate_fn(*args)
+        return self.evaluate_fn(*args, state)
 
     def _update_ranking(self, state: Dict[str, Any], attempt: AttemptRecord) -> None:
         detail = attempt.detail or {}
@@ -627,7 +643,8 @@ def native_evaluate_attempt(root, search_dir, proposal, index, state=None,
         'smoke': smoke,
     }
     stage = 'failed'
-    output = dest / 'measurement.json'
+    started = time.monotonic()
+    output = dest / 'primary' / 'measurement.json'
 
     if smoke:
         extra = ['--smoke', '--samples', str(samples), '--seed', str(seed)]
@@ -673,11 +690,12 @@ def native_evaluate_attempt(root, search_dir, proposal, index, state=None,
                     'stage': stage,
                     'detail': detail,
                 })
-                confirm_out = dest / 'confirmation.json'
+                confirm_out = dest / 'confirmation' / 'measurement.json'
                 confirm_seed = seed + 10_000 + index
-                rem2 = max_seconds - active - 1.0
+                rem2 = max_seconds - active - (time.monotonic() - started)
                 c_extra = ['--protocol', '--samples', str(samples),
-                           '--seed', str(confirm_seed)]
+                           '--seed', str(confirm_seed),
+                           '--memory-cap-bytes', str(memory_cap_bytes)]
                 spawn2 = _spawn_evaluate(root, proposal_path, confirm_out, rem2, c_extra)
                 (dest / 'confirm_stdout.log').write_text(spawn2['stdout'] or '')
                 (dest / 'confirm_stderr.log').write_text(spawn2['stderr'] or '')

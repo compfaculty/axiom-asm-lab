@@ -92,9 +92,16 @@ Acceptance: Mock search stops on each configured bound; interruption leaves reco
 
 Evidence: `evidence/T009.md`. Test flow: `docs/TEST_FLOW.md`.
 
+## Review follow-up: T009R and T009H
+
+These are prerequisites for T010. See [NEXT_CURSOR_PLAN.md](NEXT_CURSOR_PLAN.md) for implementation details and exact native validation commands.
+
+- **T009R:** validate confirmation storage, budget propagation and resume identity fixes on the target Mac. Portable tests pass; native validation remains blocked in the review environment.
+- **T009H:** harden crash recovery, persisted evidence validation, incumbent replacement and concurrent controller handling. Require failure-injection tests and native smoke evidence.
+
 ## T010 — Expand kernels and machine experiments
 
-Milestone: M005. Dependencies: T009.
+Milestone: M005. Dependencies: T009H.
 
 Implementation: Add byte search and stable filter/map with contracts; run cache/dependency experiments; compare baseline and candidates per kernel.
 
